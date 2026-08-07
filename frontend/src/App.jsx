@@ -45,18 +45,34 @@ function App() {
     e.preventDefault();
     const endpoint = isSignUp ? "/signup" : "/login";
     try {
-      const res = await axios.post(`${API_BASE}${endpoint}`, { email, password });
+      const res = await axios.post(`${API_BASE}${endpoint}`, { 
+        email: email.trim(), 
+        password: password 
+      });
+
       if (isSignUp) {
-        alert("Account created successfully! Please log in.");
+        alert("Account created successfully! 🎉 Please switch to Log In now.");
         setIsSignUp(false);
       } else {
         const accessToken = res.data.access_token || res.data.token;
-        localStorage.setItem("token", accessToken);
-        setToken(accessToken);
+        if (accessToken) {
+          localStorage.setItem("token", accessToken);
+          setToken(accessToken);
+        } else {
+          alert("Login succeeded but no token received.");
+        }
       }
     } catch (err) {
+      console.error("Auth error detail:", err.response);
       const detail = err.response?.data?.detail;
-      alert(typeof detail === 'string' ? detail : "Authentication Failed");
+      if (typeof detail === 'string') {
+        alert(`Auth Error: ${detail}`);
+      } else if (Array.isArray(detail)) {
+        const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
+        alert(`Validation Error:\n${msg}`);
+      } else {
+        alert(`Status ${err.response?.status || 'Error'}: Account may already exist or backend issue.`);
+      }
     }
   };
 
@@ -69,8 +85,6 @@ function App() {
   const fetchTasks = async () => {
     try {
       const res = await axios.get(`${API_BASE}/notifications/`, authHeader);
-      console.log("Raw Notifications API Response:", res.data);
-
       let extractedTasks = [];
       if (Array.isArray(res.data)) {
         extractedTasks = res.data;
@@ -136,10 +150,8 @@ function App() {
       } else if (Array.isArray(detail)) {
         const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
         alert(`Validation Error:\n${msg}`);
-      } else if (err.response?.status === 401) {
-        alert("Session expired. Please log out and log in again.");
       } else {
-        alert(`Error Status ${err.response?.status || 'Unknown'}: Check details`);
+        alert(`Error Status ${err.response?.status || 'Unknown'}`);
       }
     }
   };
@@ -222,7 +234,6 @@ function App() {
     );
   }
 
-  // Universal Filter that accepts both raw array tasks or notification wrapped objects
   const activeTasks = tasks.filter((t) => {
     const s = (t.status || t.state || t.user_response || "").toLowerCase();
     return s !== "completed" && s !== "done";
@@ -264,7 +275,6 @@ function App() {
 
       {activeTab === "schedule" ? (
         <main style={styles.main}>
-          {/* Quick Presets */}
           <section style={styles.card}>
             <h3>🚀 Quick Routine Presets</h3>
             <p style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "10px" }}>
@@ -279,7 +289,6 @@ function App() {
             </div>
           </section>
 
-          {/* Schedule Form */}
           <section style={styles.card}>
             <h3>➕ Schedule New Task</h3>
             <form onSubmit={handleScheduleTask} style={styles.form}>
@@ -316,7 +325,6 @@ function App() {
             </form>
           </section>
 
-          {/* Scheduled Active Tasks List */}
           <section style={styles.card}>
             <h3>📋 Scheduled Active Tasks ({tasks.length > 0 ? activeTasks.length : 0})</h3>
             {tasks.length === 0 || activeTasks.length === 0 ? (
@@ -345,7 +353,6 @@ function App() {
             )}
           </section>
 
-          {/* AI Coach Card */}
           <section style={{ ...styles.card, borderLeft: "4px solid #38bdf8" }}>
             <h3>🤖 Generative AI Life Coach</h3>
             <p style={{ fontStyle: "italic", marginTop: "8px" }}>
@@ -353,7 +360,6 @@ function App() {
             </p>
           </section>
 
-          {/* Behavioral Insights */}
           <section style={{ ...styles.card, borderLeft: "4px solid #a855f7" }}>
             <h3>🧠 Adaptive Behavioral Insights</h3>
             <p style={{ marginTop: "8px" }}>
@@ -362,7 +368,6 @@ function App() {
           </section>
         </main>
       ) : (
-        /* History Tab */
         <main style={styles.main}>
           <section style={styles.card}>
             <h3>📊 Completed Routine Record & History</h3>
