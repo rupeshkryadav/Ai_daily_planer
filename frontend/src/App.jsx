@@ -96,7 +96,7 @@ function App() {
     const endIso = new Date(endTime).toISOString();
 
     try {
-      // Backend expects Query Parameters with exact schema: title, scheduled_time, expected_end_time
+      // Primary attempt: FastAPI Query Parameters (title, scheduled_time, expected_end_time)
       await axios.post(`${API_BASE}/schedule-task`, null, {
         params: {
           title: taskName,
@@ -105,10 +105,12 @@ function App() {
         },
         headers: { Authorization: `Bearer ${token}` },
       });
+      alert("Task Scheduled Successfully! 🎉");
       resetTaskForm();
     } catch (err) {
-      // Fallback: Try sending as JSON Body if query params fail
+      console.log("Query params failed, falling back to JSON body...", err);
       try {
+        // Fallback attempt: JSON Body Payload
         await axios.post(
           `${API_BASE}/schedule-task`,
           {
@@ -118,10 +120,23 @@ function App() {
           },
           authHeader
         );
+        alert("Task Scheduled Successfully! 🎉");
         resetTaskForm();
       } catch (innerErr) {
         handleApiError(innerErr);
       }
+    }
+  };
+
+  const handleApiError = (err) => {
+    const detail = err.response?.data?.detail;
+    if (typeof detail === 'string') {
+      alert(detail);
+    } else if (Array.isArray(detail)) {
+      const msg = detail.map(item => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
+      alert(`Validation Error:\n${msg}`);
+    } else {
+      alert("Failed to schedule task. Please check details.");
     }
   };
 
@@ -160,7 +175,6 @@ function App() {
       fetchAiCoach();
       fetchInsights();
     } catch (err) {
-      // Fallback to PUT if PATCH isn't defined
       try {
         const newStatus = currentStatus === "Completed" ? "Pending" : "Completed";
         await axios.put(
@@ -311,9 +325,9 @@ function App() {
                 {activeTasks.map((t) => (
                   <div key={t.id} style={styles.taskCard}>
                     <div>
-                      <strong style={{ fontSize: "1.1rem" }}>{t.task_name}</strong>
+                      <strong style={{ fontSize: "1.1rem" }}>{t.title || t.task_name}</strong>
                       <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0" }}>
-                        🕒 {new Date(t.start_time).toLocaleString()} - {new Date(t.expected_end_time).toLocaleTimeString()}
+                        🕒 {new Date(t.scheduled_time || t.start_time).toLocaleString()} - {new Date(t.expected_end_time).toLocaleTimeString()}
                       </p>
                     </div>
                     <button
@@ -357,10 +371,10 @@ function App() {
                   <div key={t.id} style={{ ...styles.taskCard, opacity: 0.85 }}>
                     <div>
                       <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
-                        {t.task_name}
+                        {t.title || t.task_name}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#34d399", margin: "4px 0" }}>
-                        ✓ Completed on {new Date(t.start_time).toLocaleDateString()}
+                        ✓ Completed on {new Date(t.scheduled_time || t.start_time).toLocaleDateString()}
                       </p>
                     </div>
                     <button
