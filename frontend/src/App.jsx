@@ -18,14 +18,20 @@ function App() {
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
   const [notifiedTasks, setNotifiedTasks] = useState(new Set());
+  const [notifPermission, setNotifPermission] = useState(
+    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "default"
+  );
+
+  // Modal State for Task Response (Complete / Reschedule / Skip + Notes)
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [responseAction, setResponseAction] = useState("completed"); // "completed" | "rescheduled" | "skipped"
+  const [userReason, setUserReason] = useState("");
+  const [newRescheduleTime, setNewRescheduleTime] = useState("");
 
   const authHeader = {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: { Authorization: `Bearer ${token}` },
   };
 
-  // Routine Presets
   const presets = [
     { name: "Morning Workout & Exercise", durationMin: 45 },
     { name: "Focused Coding & Dev Block", durationMin: 120 },
@@ -38,15 +44,10 @@ function App() {
       fetchTasks();
       fetchAiCoach();
       fetchInsights();
-
-      // Request Web Notification permission
-      if ("Notification" in window && Notification.permission !== "granted") {
-        Notification.requestPermission();
-      }
     }
   }, [token]);
 
-  // Real-time Background Timer for Desktop Notifications
+  // Real-Time Notification Timer
   useEffect(() => {
     if (!token) return;
 
@@ -62,32 +63,41 @@ function App() {
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
 
-        // Trigger Start Notification (within 1 min window)
         const startKey = `${taskId}-start`;
         if (Math.abs(now - startMs) < 60000 && !notifiedTasks.has(startKey)) {
           if ("Notification" in window && Notification.permission === "granted") {
-            new Notification("🚀 Task Time Started!", {
-              body: `Time to begin: ${taskTitle}`,
-            });
+            new Notification("🚀 Task Started!", { body: `Time to start: ${taskTitle}` });
           }
           setNotifiedTasks((prev) => new Set(prev).add(startKey));
         }
 
-        // Trigger End Notification (within 1 min window)
         const endKey = `${taskId}-end`;
         if (endMs && Math.abs(now - endMs) < 60000 && !notifiedTasks.has(endKey)) {
           if ("Notification" in window && Notification.permission === "granted") {
-            new Notification("⏰ Expected End Time Reached!", {
-              body: `Have you completed: ${taskTitle}?`,
-            });
+            new Notification("⏰ Task Time Ended!", { body: `How did it go for: ${taskTitle}?` });
           }
           setNotifiedTasks((prev) => new Set(prev).add(endKey));
         }
       });
-    }, 15000); // Check every 15 seconds
+    }, 15000);
 
     return () => clearInterval(interval);
   }, [tasks, token, notifiedTasks]);
+
+  const requestNotificationPermission = () => {
+    if ("Notification" in window) {
+      Notification.requestPermission().then((permission) => {
+        setNotifPermission(permission);
+        if (permission === "granted") {
+          alert("Notification Permission Granted! 🎉");
+        } else {
+          alert("Notification Permission Denied by Browser.");
+        }
+      });
+    } else {
+      alert("Browser does not support notifications.");
+    }
+  };
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -167,7 +177,7 @@ function App() {
 
   const fetchAiCoach = async () => {
     try {
-      setAiTip("AI Life Coach active: Complete your routines on schedule to build positive habits.");
+      setAiTip("AI Life Coach active: Analyzing your completion reasons to optimize daily productivity.");
     } catch (err) {
       console.error(err);
     }
@@ -175,7 +185,7 @@ function App() {
 
   const fetchInsights = async () => {
     try {
-      setInsights("Maintain a 2-day streak to unlock deeper behavioral recommendations.");
+      setInsights("Tracking completion vs skip reasons builds personalized streak insights.");
     } catch (err) {
       console.error(err);
     }
@@ -223,7 +233,7 @@ function App() {
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! 🔔 Notification set.");
+    alert("Task Scheduled Successfully! 🔔 Notification active.");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -243,8 +253,11 @@ function App() {
     setEndTime(formatLocal(end));
   };
 
-  const toggleTaskComplete = async (item) => {
-    const targetId = item.notification_id || item.task_id || item.id;
+  // Submit User Feedback Modal (Complete / Reschedule / Skip + Notes)
+  const handleSubmitTaskResponse = async () => {
+    if (!selectedTask) return;
+
+    const targetId = selectedTask.notification_id || selectedTask.task_id || selectedTask.id;
 
     try {
       if (targetId && typeof targetId === 'number') {
@@ -252,25 +265,37 @@ function App() {
           `${API_BASE}/tasks/${targetId}/respond`,
           null,
           {
-            params: { user_response: "completed" },
+            params: { 
+              user_response: responseAction,
+              notes: userReason,
+              reschedule_time: newRescheduleTime ? new Date(newRescheduleTime).toISOString() : null
+            },
             headers: { Authorization: `Bearer ${token}` },
           }
         );
       }
     } catch (err) {
-      console.log("Status updated locally");
+      console.log("Status recorded locally");
     }
 
     setTasks((prev) =>
       prev.map((t) => {
-        if ((t.notification_id || t.id) === (item.notification_id || item.id)) {
-          return { ...t, status: "completed" };
+        if ((t.notification_id || t.id) === (selectedTask.notification_id || selectedTask.id)) {
+          return { 
+            ...t, 
+            status: responseAction,
+            user_reason: userReason,
+            rescheduled_time: newRescheduleTime 
+          };
         }
         return t;
       })
     );
 
-    alert("Task Marked Complete! ✓");
+    alert(`Task marked as ${responseAction.toUpperCase()}! Feedback saved.`);
+    setSelectedTask(null);
+    setUserReason("");
+    setNewRescheduleTime("");
   };
 
   if (!token) {
@@ -312,19 +337,24 @@ function App() {
 
   const activeTasks = tasks.filter((t) => {
     const s = (t.status || t.state || t.user_response || "").toLowerCase();
-    return s !== "completed" && s !== "done";
+    return s !== "completed" && s !== "done" && s !== "skipped" && s !== "rescheduled";
   });
 
   const completedTasks = tasks.filter((t) => {
     const s = (t.status || t.state || t.user_response || "").toLowerCase();
-    return s === "completed" || s === "done";
+    return s === "completed" || s === "done" || s === "skipped" || s === "rescheduled";
   });
 
   return (
     <div style={styles.appContainer}>
       <header style={styles.header}>
         <h1 style={{ fontSize: "1.5rem" }}>⚡ AI Daily Life OS</h1>
-        <div>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          {notifPermission !== "granted" && (
+            <button onClick={requestNotificationPermission} style={styles.btnNotif}>
+              🔔 Enable Notifications
+            </button>
+          )}
           <button
             onClick={() => setActiveTab("schedule")}
             style={{
@@ -419,10 +449,10 @@ function App() {
                       </p>
                     </div>
                     <button
-                      onClick={() => toggleTaskComplete(t)}
-                      style={styles.btnComplete}
+                      onClick={() => setSelectedTask(t)}
+                      style={styles.btnAction}
                     >
-                      Mark Complete ✓
+                      Update Status ⚙️
                     </button>
                   </div>
                 ))}
@@ -447,20 +477,25 @@ function App() {
       ) : (
         <main style={styles.main}>
           <section style={styles.card}>
-            <h3>📊 Completed Routine Record & History</h3>
+            <h3>📊 Routine History & Experience Log</h3>
             {completedTasks.length === 0 ? (
-              <p style={{ color: "#94a3b8" }}>No completed tasks recorded yet.</p>
+              <p style={{ color: "#94a3b8" }}>No completed or logged tasks yet.</p>
             ) : (
               <div style={styles.taskList}>
                 {completedTasks.map((t, idx) => (
-                  <div key={t.notification_id || t.task_id || t.id || idx} style={{ ...styles.taskCard, opacity: 0.85 }}>
+                  <div key={t.notification_id || t.task_id || t.id || idx} style={{ ...styles.taskCard, opacity: 0.9 }}>
                     <div>
-                      <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
-                        {t.title || t.message || t.task_name || "Completed Task"}
+                      <strong style={{ fontSize: "1.1rem" }}>
+                        {t.title || t.message || t.task_name || "Task"}
                       </strong>
-                      <p style={{ fontSize: "0.8rem", color: "#34d399", margin: "4px 0" }}>
-                        ✓ Completed
+                      <p style={{ fontSize: "0.85rem", color: t.status === "completed" ? "#34d399" : t.status === "skipped" ? "#ef4444" : "#f59e0b", margin: "4px 0" }}>
+                        Status: <b>{t.status?.toUpperCase()}</b>
                       </p>
+                      {t.user_reason && (
+                        <p style={{ fontSize: "0.8rem", color: "#cbd5e1", fontStyle: "italic", marginTop: "4px" }}>
+                          💬 Notes/Reason: "{t.user_reason}"
+                        </p>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -468,6 +503,79 @@ function App() {
             )}
           </section>
         </main>
+      )}
+
+      {/* Task Response Modal */}
+      {selectedTask && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modalCard}>
+            <h3>Update Task: "{selectedTask.title || selectedTask.task_name || 'Task'}"</h3>
+            
+            <label style={styles.labelModal}>Select Status:</label>
+            <div style={{ display: "flex", gap: "10px", margin: "10px 0" }}>
+              <button
+                type="button"
+                onClick={() => setResponseAction("completed")}
+                style={{
+                  ...styles.statusBtn,
+                  backgroundColor: responseAction === "completed" ? "#10b981" : "#334155"
+                }}
+              >
+                ✓ Complete
+              </button>
+              <button
+                type="button"
+                onClick={() => setResponseAction("rescheduled")}
+                style={{
+                  ...styles.statusBtn,
+                  backgroundColor: responseAction === "rescheduled" ? "#f59e0b" : "#334155"
+                }}
+              >
+                🕒 Reschedule
+              </button>
+              <button
+                type="button"
+                onClick={() => setResponseAction("skipped")}
+                style={{
+                  ...styles.statusBtn,
+                  backgroundColor: responseAction === "skipped" ? "#ef4444" : "#334155"
+                }}
+              >
+                🚫 Skip
+              </button>
+            </div>
+
+            {responseAction === "rescheduled" && (
+              <div style={{ marginBottom: "12px" }}>
+                <label style={styles.labelModal}>New Scheduled Time:</label>
+                <input
+                  type="datetime-local"
+                  value={newRescheduleTime}
+                  onChange={(e) => setNewRescheduleTime(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+            )}
+
+            <label style={styles.labelModal}>Reason / Reflection / Experience Notes:</label>
+            <textarea
+              placeholder="e.g., Finished smoothly! / Felt tired / Had college work..."
+              value={userReason}
+              onChange={(e) => setUserReason(e.target.value)}
+              rows={3}
+              style={{ ...styles.input, resize: "vertical" }}
+            />
+
+            <div style={{ display: "flex", gap: "10px", marginTop: "15px", justifyContent: "flex-end" }}>
+              <button onClick={() => setSelectedTask(null)} style={styles.btnCancel}>
+                Cancel
+              </button>
+              <button onClick={handleSubmitTaskResponse} style={styles.btnSubmit}>
+                Save Feedback
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -478,7 +586,8 @@ const styles = {
   authContainer: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#0f172a", color: "#f8fafc" },
   authCard: { backgroundColor: "#1e293b", padding: "30px", borderRadius: "12px", width: "100%", maxWidth: "400px", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.5)" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 30px", backgroundColor: "#1e293b", borderBottom: "1px solid #334155", flexWrap: "wrap", gap: "10px" },
-  tabBtn: { color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer", marginRight: "8px" },
+  tabBtn: { color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
+  btnNotif: { backgroundColor: "#eab308", color: "#0f172a", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   btnLogout: { backgroundColor: "#ef4444", color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   main: { maxWidth: "800px", margin: "30px auto", padding: "0 20px", display: "flex", flexDirection: "column", gap: "20px" },
   card: { backgroundColor: "#1e293b", padding: "20px", borderRadius: "10px", boxShadow: "0 4px 6px rgba(0, 0, 0, 0.3)" },
@@ -491,7 +600,15 @@ const styles = {
   btnPrimary: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   taskList: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" },
   taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
-  btnComplete: { backgroundColor: "#10b981", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
+  btnAction: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
+  
+  // Modal Styles
+  modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
+  modalCard: { backgroundColor: "#1e293b", padding: "25px", borderRadius: "12px", width: "90%", maxWidth: "480px", border: "1px solid #334155" },
+  labelModal: { display: "block", fontSize: "0.85rem", color: "#94a3b8", marginTop: "10px" },
+  statusBtn: { flex: 1, padding: "10px", color: "#fff", border: "none", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
+  btnCancel: { backgroundColor: "#475569", color: "#fff", border: "none", padding: "10px 16px", borderRadius: "6px", cursor: "pointer" },
+  btnSubmit: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "10px 16px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
 };
 
 export default App;
