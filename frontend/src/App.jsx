@@ -18,13 +18,15 @@ function App() {
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
   const [notifiedTasks, setNotifiedTasks] = useState(new Set());
+  const [activeAlert, setActiveAlert] = useState(null); // In-app notification banner
+
   const [notifPermission, setNotifPermission] = useState(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "default"
   );
 
-  // Modal State for Task Response (Complete / Reschedule / Skip + Notes)
+  // Modal State for Task Response
   const [selectedTask, setSelectedTask] = useState(null);
-  const [responseAction, setResponseAction] = useState("completed"); // "completed" | "rescheduled" | "skipped"
+  const [responseAction, setResponseAction] = useState("completed"); 
   const [userReason, setUserReason] = useState("");
   const [newRescheduleTime, setNewRescheduleTime] = useState("");
 
@@ -47,7 +49,12 @@ function App() {
     }
   }, [token]);
 
-  // Real-Time Notification Timer
+  // Recalculate Dynamic AI Coach Insights based on Task History
+  useEffect(() => {
+    updateDynamicAiAnalytics(tasks);
+  }, [tasks]);
+
+  // Real-Time Notification Check Engine (Checks every 10 seconds)
   useEffect(() => {
     if (!token) return;
 
@@ -57,41 +64,69 @@ function App() {
       tasks.forEach((t) => {
         const taskId = t.notification_id || t.task_id || t.id;
         const taskTitle = t.title || t.message || t.task_name || "Task";
-        
+        const status = (t.status || t.state || "").toLowerCase();
+
+        if (status === "completed" || status === "skipped") return;
         if (!t.scheduled_time && !t.start_time) return;
 
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
 
+        // Start Notification Trigger
         const startKey = `${taskId}-start`;
         if (Math.abs(now - startMs) < 60000 && !notifiedTasks.has(startKey)) {
-          if ("Notification" in window && Notification.permission === "granted") {
-            new Notification("🚀 Task Started!", { body: `Time to start: ${taskTitle}` });
-          }
+          triggerDualNotification(
+            "🚀 Task Started!",
+            `Time to begin: '${taskTitle}'. Focus block activated!`
+          );
           setNotifiedTasks((prev) => new Set(prev).add(startKey));
         }
 
+        // End Notification Trigger
         const endKey = `${taskId}-end`;
         if (endMs && Math.abs(now - endMs) < 60000 && !notifiedTasks.has(endKey)) {
-          if ("Notification" in window && Notification.permission === "granted") {
-            new Notification("⏰ Task Time Ended!", { body: `How did it go for: ${taskTitle}?` });
-          }
+          triggerDualNotification(
+            "⏰ Task Time Reached!",
+            `Scheduled slot for '${taskTitle}' ended. Update status & notes!`
+          );
           setNotifiedTasks((prev) => new Set(prev).add(endKey));
         }
       });
-    }, 15000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [tasks, token, notifiedTasks]);
+
+  const triggerDualNotification = (title, body) => {
+    // 1. Browser Native Desktop Popup
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification(title, { body });
+    }
+
+    // 2. In-App Banner Alert (Guaranteed visible even if Windows blocks popups)
+    setActiveAlert({ title, body, time: new Date().toLocaleTimeString() });
+
+    // Play alert sound if audio context available
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      osc.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    } catch (e) {
+      console.log("Audio not supported");
+    }
+  };
 
   const requestNotificationPermission = () => {
     if ("Notification" in window) {
       Notification.requestPermission().then((permission) => {
         setNotifPermission(permission);
         if (permission === "granted") {
-          alert("Notification Permission Granted! 🎉");
+          alert("Notification Permission Granted! 🎉 Test popup sent.");
+          new Notification("AI Daily Life OS", { body: "Notifications are now active for all tasks!" });
         } else {
-          alert("Notification Permission Denied by Browser.");
+          alert("Browser notification permission denied. In-app alerts will still work.");
         }
       });
     } else {
@@ -177,7 +212,8 @@ function App() {
 
   const fetchAiCoach = async () => {
     try {
-      setAiTip("AI Life Coach active: Analyzing your completion reasons to optimize daily productivity.");
+      const res = await axios.get(`${API_BASE}/users/me/ai-coach`, authHeader);
+      if (res.data?.tip) setAiTip(res.data.tip);
     } catch (err) {
       console.error(err);
     }
@@ -185,10 +221,43 @@ function App() {
 
   const fetchInsights = async () => {
     try {
-      setInsights("Tracking completion vs skip reasons builds personalized streak insights.");
+      const res = await axios.get(`${API_BASE}/users/me/recommendations`, authHeader);
+      if (res.data?.recommendation) setInsights(res.data.recommendation);
     } catch (err) {
       console.error(err);
     }
+  };
+
+  // Dynamic AI Analytics Engine (Analyzes user logs & reasons in real time)
+  const updateDynamicAiAnalytics = (allTasks) => {
+    const completed = allTasks.filter(t => (t.status || "").toLowerCase() === "completed");
+    const skipped = allTasks.filter(t => (t.status || "").toLowerCase() === "skipped");
+    const totalLogged = completed.length + skipped.length;
+
+    if (totalLogged === 0) {
+      setAiTip("Welcome! Schedule a task and update your experience to get personalized AI coaching.");
+      setInsights("No activity logged yet. 1 completed routine unlocks initial behavioral insights.");
+      return;
+    }
+
+    const rate = Math.round((completed.length / totalLogged) * 100);
+    const lastReason = [...allTasks].reverse().find(t => t.user_reason)?.user_reason;
+
+    // AI Coach Tip Generator based on logged history
+    if (rate >= 80) {
+      setAiTip(`🔥 Excellent Consistency! ${rate}% completion rate across ${totalLogged} routines. Keep maintaining momentum!`);
+    } else if (rate >= 50) {
+      setAiTip(`⚖️ Solid Progress (${rate}% rate). ${lastReason ? `Note on last task: "${lastReason}".` : ''} Focus on minimizing delays.`);
+    } else {
+      setAiTip(`💡 Recovery Mode (${rate}% rate). Try breaking tasks into smaller 20-minute focus blocks to build consistency.`);
+    }
+
+    // Adaptive Behavioral Insights Generator
+    setInsights(
+      `📊 Analysis: ${completed.length} Completed | ${skipped.length} Skipped. ${
+        lastReason ? `Latest experience reflection: "${lastReason}".` : 'Keep adding feedback notes when updating tasks.'
+      }`
+    );
   };
 
   const handleScheduleTask = async (e) => {
@@ -233,7 +302,7 @@ function App() {
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! 🔔 Notification active.");
+    alert("Task Scheduled Successfully! 🔔 Notification set.");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -253,7 +322,7 @@ function App() {
     setEndTime(formatLocal(end));
   };
 
-  // Submit User Feedback Modal (Complete / Reschedule / Skip + Notes)
+  // Submit User Feedback Modal
   const handleSubmitTaskResponse = async () => {
     if (!selectedTask) return;
 
@@ -292,7 +361,7 @@ function App() {
       })
     );
 
-    alert(`Task marked as ${responseAction.toUpperCase()}! Feedback saved.`);
+    alert(`Status updated to ${responseAction.toUpperCase()}! AI Coach updated.`);
     setSelectedTask(null);
     setUserReason("");
     setNewRescheduleTime("");
@@ -347,6 +416,17 @@ function App() {
 
   return (
     <div style={styles.appContainer}>
+      {/* Top Notification Banner */}
+      {activeAlert && (
+        <div style={styles.alertBanner}>
+          <div>
+            <strong>{activeAlert.title}</strong> — {activeAlert.body}
+            <span style={{ fontSize: "0.8rem", opacity: 0.8, marginLeft: "10px" }}>[{activeAlert.time}]</span>
+          </div>
+          <button onClick={() => setActiveAlert(null)} style={styles.btnDismiss}>✕ Dismiss</button>
+        </div>
+      )}
+
       <header style={styles.header}>
         <h1 style={{ fontSize: "1.5rem" }}>⚡ AI Daily Life OS</h1>
         <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
@@ -460,17 +540,19 @@ function App() {
             )}
           </section>
 
+          {/* DYNAMIC REAL-TIME AI COACH */}
           <section style={{ ...styles.card, borderLeft: "4px solid #38bdf8" }}>
             <h3>🤖 Generative AI Life Coach</h3>
-            <p style={{ fontStyle: "italic", marginTop: "8px" }}>
-              "{aiTip || "Tasks complete kijiye, phir main aapki habits analyze karke tips dunga!"}"
+            <p style={{ fontStyle: "italic", marginTop: "8px", color: "#e2e8f0" }}>
+              "{aiTip}"
             </p>
           </section>
 
+          {/* DYNAMIC REAL-TIME BEHAVIORAL INSIGHTS */}
           <section style={{ ...styles.card, borderLeft: "4px solid #a855f7" }}>
             <h3>🧠 Adaptive Behavioral Insights</h3>
-            <p style={{ marginTop: "8px" }}>
-              {insights || "Abhi enough data nahi hai. 2-3 tasks complete karke record dekhiye!"}
+            <p style={{ marginTop: "8px", color: "#e2e8f0" }}>
+              {insights}
             </p>
           </section>
         </main>
@@ -493,7 +575,7 @@ function App() {
                       </p>
                       {t.user_reason && (
                         <p style={{ fontSize: "0.8rem", color: "#cbd5e1", fontStyle: "italic", marginTop: "4px" }}>
-                          💬 Notes/Reason: "{t.user_reason}"
+                          💬 Experience Notes: "{t.user_reason}"
                         </p>
                       )}
                     </div>
@@ -505,7 +587,7 @@ function App() {
         </main>
       )}
 
-      {/* Task Response Modal */}
+      {/* Task Feedback Modal */}
       {selectedTask && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
@@ -557,9 +639,9 @@ function App() {
               </div>
             )}
 
-            <label style={styles.labelModal}>Reason / Reflection / Experience Notes:</label>
+            <label style={styles.labelModal}>Reason / Experience Reflection:</label>
             <textarea
-              placeholder="e.g., Finished smoothly! / Felt tired / Had college work..."
+              placeholder="e.g., Coding went great! / Got delayed due to college work..."
               value={userReason}
               onChange={(e) => setUserReason(e.target.value)}
               rows={3}
@@ -602,6 +684,10 @@ const styles = {
   taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnAction: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
   
+  // Alert Banner
+  alertBanner: { backgroundColor: "#0284c7", color: "#fff", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", fontWeight: "bold" },
+  btnDismiss: { backgroundColor: "transparent", color: "#fff", border: "1px solid #fff", padding: "4px 10px", borderRadius: "4px", cursor: "pointer" },
+
   // Modal Styles
   modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
   modalCard: { backgroundColor: "#1e293b", padding: "25px", borderRadius: "12px", width: "90%", maxWidth: "480px", border: "1px solid #334155" },
