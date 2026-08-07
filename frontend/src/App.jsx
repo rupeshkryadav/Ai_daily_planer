@@ -18,7 +18,12 @@ function App() {
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
 
-  const authHeader = { headers: { Authorization: `Bearer ${token}` } };
+  const authHeader = {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  };
 
   // Routine Presets
   const presets = [
@@ -42,20 +47,23 @@ function App() {
     try {
       const res = await axios.post(`${API_BASE}${endpoint}`, { email, password });
       if (isSignUp) {
-        alert("Account created! Please log in.");
+        alert("Account created successfully! Please log in.");
         setIsSignUp(false);
       } else {
-        localStorage.setItem("token", res.data.access_token);
-        setToken(res.data.access_token);
+        const accessToken = res.data.access_token || res.data.token;
+        localStorage.setItem("token", accessToken);
+        setToken(accessToken);
       }
     } catch (err) {
-      alert(err.response?.data?.detail || "Authentication Failed");
+      const detail = err.response?.data?.detail;
+      alert(typeof detail === 'string' ? detail : "Authentication Failed");
     }
   };
 
   const handleLogout = () => {
     localStorage.removeItem("token");
     setToken("");
+    setTasks([]);
   };
 
   const fetchTasks = async () => {
@@ -63,25 +71,25 @@ function App() {
       const res = await axios.get(`${API_BASE}/notifications/`, authHeader);
       setTasks(res.data || []);
     } catch (err) {
-      console.error(err);
+      console.error("Fetch tasks error:", err);
     }
   };
 
   const fetchAiCoach = async () => {
     try {
       const res = await axios.get(`${API_BASE}/users/me/ai-coach`, authHeader);
-      setAiTip(res.data.tip || res.data.message || "");
+      setAiTip(res.data.tip || res.data.message || res.data.ai_coach_insights || "");
     } catch (err) {
-      console.error(err);
+      console.error("Fetch AI coach error:", err);
     }
   };
 
   const fetchInsights = async () => {
     try {
       const res = await axios.get(`${API_BASE}/users/me/recommendations`, authHeader);
-      setInsights(res.data.recommendation || res.data.message || "");
+      setInsights(res.data.recommendation || res.data.message || res.data.recommendations || "");
     } catch (err) {
-      console.error(err);
+      console.error("Fetch insights error:", err);
     }
   };
 
@@ -96,21 +104,36 @@ function App() {
     const endIso = new Date(endTime).toISOString();
 
     try {
-      // Exact FastAPI endpoint from docs: POST /tasks/ with Query Params
-      await axios.post(`${API_BASE}/tasks/`, null, {
-        params: {
-          title: taskName,
-          scheduled_time: startIso,
-          expected_end_time: endIso,
-        },
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // POST /tasks/ via Query Parameters as defined in FastAPI Swagger Specs
+      await axios.post(
+        `${API_BASE}/tasks/`,
+        null,
+        {
+          params: {
+            title: taskName,
+            scheduled_time: startIso,
+            expected_end_time: endIso,
+          },
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
       alert("Task Scheduled Successfully! 🎉");
       resetTaskForm();
     } catch (err) {
+      console.error("Schedule error:", err);
       const detail = err.response?.data?.detail;
-      if (typeof detail === 'string') alert(detail);
-      else alert("Failed to schedule task.");
+      if (typeof detail === 'string') {
+        alert(`Backend Error: ${detail}`);
+      } else if (Array.isArray(detail)) {
+        const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
+        alert(`Validation Error:\n${msg}`);
+      } else if (err.response?.status === 401) {
+        alert("Session expired. Please log out and log in again.");
+      } else {
+        alert(`Error Status ${err.response?.status || 'Unknown'}: Check details`);
+      }
     }
   };
 
@@ -139,11 +162,15 @@ function App() {
 
   const toggleTaskComplete = async (taskId) => {
     try {
-      // Exact endpoint from docs: PUT /tasks/{task_id}/respond
-      await axios.put(`${API_BASE}/tasks/${taskId}/respond`, null, {
-        params: { user_response: "completed" },
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // PUT /tasks/{task_id}/respond via Query Parameters
+      await axios.put(
+        `${API_BASE}/tasks/${taskId}/respond`,
+        null,
+        {
+          params: { user_response: "completed" },
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
       fetchTasks();
       fetchAiCoach();
       fetchInsights();
@@ -223,6 +250,7 @@ function App() {
 
       {activeTab === "schedule" ? (
         <main style={styles.main}>
+          {/* Presets Card */}
           <section style={styles.card}>
             <h3>🚀 Quick Routine Presets</h3>
             <p style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "10px" }}>
@@ -237,6 +265,7 @@ function App() {
             </div>
           </section>
 
+          {/* Schedule Form */}
           <section style={styles.card}>
             <h3>➕ Schedule New Task</h3>
             <form onSubmit={handleScheduleTask} style={styles.form}>
@@ -273,6 +302,7 @@ function App() {
             </form>
           </section>
 
+          {/* Active Tasks */}
           <section style={styles.card}>
             <h3>📋 Scheduled Active Tasks ({activeTasks.length})</h3>
             {activeTasks.length === 0 ? (
@@ -280,15 +310,15 @@ function App() {
             ) : (
               <div style={styles.taskList}>
                 {activeTasks.map((t) => (
-                  <div key={t.id} style={styles.taskCard}>
+                  <div key={t.id || t.task_id} style={styles.taskCard}>
                     <div>
                       <strong style={{ fontSize: "1.1rem" }}>{t.title || t.task_name}</strong>
                       <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0" }}>
-                        🕒 {new Date(t.scheduled_time || t.start_time).toLocaleString()} - {new Date(t.expected_end_time).toLocaleTimeString()}
+                        🕒 {new Date(t.scheduled_time || t.start_time).toLocaleString()}
                       </p>
                     </div>
                     <button
-                      onClick={() => toggleTaskComplete(t.id)}
+                      onClick={() => toggleTaskComplete(t.id || t.task_id)}
                       style={styles.btnComplete}
                     >
                       Mark Complete ✓
@@ -299,6 +329,7 @@ function App() {
             )}
           </section>
 
+          {/* AI Coach */}
           <section style={{ ...styles.card, borderLeft: "4px solid #38bdf8" }}>
             <h3>🤖 Generative AI Life Coach</h3>
             <p style={{ fontStyle: "italic", marginTop: "8px" }}>
@@ -306,6 +337,7 @@ function App() {
             </p>
           </section>
 
+          {/* Insights */}
           <section style={{ ...styles.card, borderLeft: "4px solid #a855f7" }}>
             <h3>🧠 Adaptive Behavioral Insights</h3>
             <p style={{ marginTop: "8px" }}>
@@ -314,6 +346,7 @@ function App() {
           </section>
         </main>
       ) : (
+        /* History Tab */
         <main style={styles.main}>
           <section style={styles.card}>
             <h3>📊 Completed Routine Record & History</h3>
@@ -322,7 +355,7 @@ function App() {
             ) : (
               <div style={styles.taskList}>
                 {completedTasks.map((t) => (
-                  <div key={t.id} style={{ ...styles.taskCard, opacity: 0.85 }}>
+                  <div key={t.id || t.task_id} style={{ ...styles.taskCard, opacity: 0.85 }}>
                     <div>
                       <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
                         {t.title || t.task_name}
@@ -359,7 +392,7 @@ const styles = {
   input: { width: "100%", padding: "10px", borderRadius: "6px", border: "1px solid #334155", backgroundColor: "#0f172a", color: "#fff", boxSizing: "border-box" },
   btnPrimary: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   taskList: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" },
-  taskCard: { display: "flex", justify: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
+  taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnComplete: { backgroundColor: "#10b981", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
 };
 
