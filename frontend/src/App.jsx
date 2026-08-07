@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import './App.css';
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://ai-daily-backend-ldjh.onrender.com";
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
