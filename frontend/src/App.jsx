@@ -22,7 +22,10 @@ function App() {
   const [aiTip, setAiTip] = useState("");
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
-  const [notifiedTasks, setNotifiedTasks] = useState(new Set());
+  const [notifiedTasks, setNotifiedTasks] = useState(() => {
+    const saved = localStorage.getItem("ai_notified_keys");
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
   const [activeAlert, setActiveAlert] = useState(null);
 
   const [notifPermission, setNotifPermission] = useState(
@@ -46,11 +49,16 @@ function App() {
     { name: "Night Review & Planning", durationMin: 20 },
   ];
 
-  // Sync tasks to permanent LocalStorage whenever tasks array changes
+  // Sync tasks to permanent LocalStorage
   useEffect(() => {
     localStorage.setItem("ai_daily_tasks", JSON.stringify(tasks));
     updateDynamicAiAnalytics(tasks);
   }, [tasks]);
+
+  // Sync notified keys to permanent LocalStorage
+  useEffect(() => {
+    localStorage.setItem("ai_notified_keys", JSON.stringify(Array.from(notifiedTasks)));
+  }, [notifiedTasks]);
 
   useEffect(() => {
     if (token) {
@@ -60,7 +68,31 @@ function App() {
     }
   }, [token]);
 
-  // Real-Time Notification Engine
+  // Beep Audio Alert Synthesizer
+  const playAlertSound = () => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime); // A5 note
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.4);
+    } catch (e) {
+      console.log("Audio play error:", e);
+    }
+  };
+
+  // Real-Time Notification Check Engine (Runs every 10 seconds)
   useEffect(() => {
     if (!token) return;
 
@@ -78,20 +110,22 @@ function App() {
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
 
+        // 1. START TIME ALERT (Triggers when start time arrives)
         const startKey = `${taskId}-start`;
-        if (Math.abs(now - startMs) < 60000 && !notifiedTasks.has(startKey)) {
+        if (now >= startMs && now < startMs + 90000 && !notifiedTasks.has(startKey)) {
           triggerDualNotification(
-            "🚀 Task Started!",
-            `Time to begin: '${taskTitle}'. Focus block activated!`
+            "🚀 Task Time Started!",
+            `Time slot for '${taskTitle}' has begun! Focus mode activated.`
           );
           setNotifiedTasks((prev) => new Set(prev).add(startKey));
         }
 
+        // 2. END TIME ALERT (Triggers when expected end time arrives)
         const endKey = `${taskId}-end`;
-        if (endMs && Math.abs(now - endMs) < 60000 && !notifiedTasks.has(endKey)) {
+        if (endMs && now >= endMs && now < endMs + 90000 && !notifiedTasks.has(endKey)) {
           triggerDualNotification(
-            "⏰ Task Time Reached!",
-            `Scheduled slot for '${taskTitle}' ended. Update status & notes!`
+            "⏰ Expected End Time Reached!",
+            `Time slot for '${taskTitle}' is over. Please update status & reflection.`
           );
           setNotifiedTasks((prev) => new Set(prev).add(endKey));
         }
@@ -102,6 +136,8 @@ function App() {
   }, [tasks, token, notifiedTasks]);
 
   const triggerDualNotification = (title, body) => {
+    playAlertSound();
+
     if ("Notification" in window && Notification.permission === "granted") {
       new Notification(title, { body });
     }
@@ -113,8 +149,9 @@ function App() {
       Notification.requestPermission().then((permission) => {
         setNotifPermission(permission);
         if (permission === "granted") {
-          alert("Notification Permission Granted! 🎉");
-          new Notification("AI Daily Life OS", { body: "Notifications enabled successfully!" });
+          playAlertSound();
+          alert("Notification & Audio Sound Enabled! 🎉");
+          new Notification("AI Daily Life OS", { body: "Notifications and alerts are active!" });
         }
       });
     }
@@ -172,6 +209,7 @@ function App() {
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("ai_daily_tasks");
+    localStorage.removeItem("ai_notified_keys");
     setToken("");
     setTasks([]);
   };
@@ -186,7 +224,6 @@ function App() {
         extractedTasks = res.data.notifications || res.data.tasks || res.data.data || [];
       }
       
-      // Merge backend tasks with local persistent tasks (never lose local logs)
       setTasks(prev => {
         if (extractedTasks.length === 0) return prev;
         
@@ -220,7 +257,6 @@ function App() {
     }
   };
 
-  // Dynamic AI Analytics Engine (Evaluates entire history)
   const updateDynamicAiAnalytics = (allTasks) => {
     const completed = allTasks.filter(t => (t.status || "").toLowerCase() === "completed");
     const skipped = allTasks.filter(t => (t.status || "").toLowerCase() === "skipped");
@@ -292,7 +328,7 @@ function App() {
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! Saved permanently.");
+    alert("Task Scheduled Successfully! Start and End alerts set.");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -418,11 +454,9 @@ function App() {
       <header style={styles.header}>
         <h1 style={{ fontSize: "1.5rem" }}>⚡ AI Daily Life OS</h1>
         <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          {notifPermission !== "granted" && (
-            <button onClick={requestNotificationPermission} style={styles.btnNotif}>
-              🔔 Enable Notifications
-            </button>
-          )}
+          <button onClick={requestNotificationPermission} style={styles.btnNotif}>
+            🔔 Enable Notifications & Sound
+          </button>
           <button
             onClick={() => setActiveTab("schedule")}
             style={{
