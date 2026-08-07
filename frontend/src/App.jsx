@@ -28,7 +28,12 @@ function App() {
   });
   const [activeAlert, setActiveAlert] = useState(null);
 
-  // Permanent Notification Permission Check
+  // User Mute Preference State (Saved in LocalStorage)
+  const [isMuted, setIsMuted] = useState(() => {
+    return localStorage.getItem("ai_app_muted") === "true";
+  });
+
+  // Browser Permission State
   const [notifPermission, setNotifPermission] = useState(() => {
     if (typeof window !== "undefined" && "Notification" in window) {
       return Notification.permission;
@@ -53,12 +58,16 @@ function App() {
     { name: "Night Review & Planning", durationMin: 20 },
   ];
 
-  // Auto Check Permission Status on Mount
   useEffect(() => {
     if (typeof window !== "undefined" && "Notification" in window) {
       setNotifPermission(Notification.permission);
     }
   }, []);
+
+  // Save Mute Preference to LocalStorage
+  useEffect(() => {
+    localStorage.setItem("ai_app_muted", isMuted);
+  }, [isMuted]);
 
   // Sync tasks to permanent LocalStorage
   useEffect(() => {
@@ -79,8 +88,9 @@ function App() {
     }
   }, [token]);
 
-  // Beep Audio Alert Synthesizer
+  // Audio Synthesizer Beep (Respects isMuted)
   const playAlertSound = () => {
+    if (isMuted) return; // Don't play if user muted
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
@@ -103,9 +113,9 @@ function App() {
     }
   };
 
-  // Real-Time Permanent Notification Check Engine (Runs every 10 seconds for ALL tasks)
+  // Real-Time Permanent Notification Engine
   useEffect(() => {
-    if (!token) return;
+    if (!token || isMuted) return; // Stop triggering notifications if user muted
 
     const interval = setInterval(() => {
       const now = new Date().getTime();
@@ -144,7 +154,7 @@ function App() {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [tasks, token, notifiedTasks]);
+  }, [tasks, token, notifiedTasks, isMuted]);
 
   const triggerDualNotification = (title, body) => {
     playAlertSound();
@@ -160,12 +170,16 @@ function App() {
       Notification.requestPermission().then((permission) => {
         setNotifPermission(permission);
         if (permission === "granted") {
+          setIsMuted(false);
           playAlertSound();
-          alert("Notifications permanently enabled for all tasks! 🎉");
-          new Notification("AI Daily Life OS", { body: "Automatic alerts are active for every scheduled task." });
+          alert("Notifications enabled! You can toggle Mute anytime from top bar. 🎉");
         }
       });
     }
+  };
+
+  const toggleMute = () => {
+    setIsMuted((prev) => !prev);
   };
 
   const handleAuth = async (e) => {
@@ -221,6 +235,7 @@ function App() {
     localStorage.removeItem("token");
     localStorage.removeItem("ai_daily_tasks");
     localStorage.removeItem("ai_notified_keys");
+    localStorage.removeItem("ai_app_muted");
     setToken("");
     setTasks([]);
   };
@@ -339,7 +354,7 @@ function App() {
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! Automatic notifications enabled for this task.");
+    alert("Task Scheduled Successfully!");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -452,7 +467,7 @@ function App() {
 
   return (
     <div style={styles.appContainer}>
-      {activeAlert && (
+      {activeAlert && !isMuted && (
         <div style={styles.alertBanner}>
           <div>
             <strong>{activeAlert.title}</strong> — {activeAlert.body}
@@ -470,10 +485,19 @@ function App() {
               🔔 Enable Notifications & Sound
             </button>
           ) : (
-            <span style={styles.badgeNotifActive}>
-              🟢 Notifications Active
-            </span>
+            <button
+              onClick={toggleMute}
+              style={{
+                ...styles.badgeNotifToggle,
+                backgroundColor: isMuted ? "#ef444422" : "#10b98122",
+                color: isMuted ? "#f87171" : "#34d399",
+                borderColor: isMuted ? "#ef4444" : "#10b981",
+              }}
+            >
+              {isMuted ? "🔕 Notifications Muted" : "🟢 Notifications Active"}
+            </button>
           )}
+
           <button
             onClick={() => setActiveTab("schedule")}
             style={{
@@ -706,7 +730,7 @@ const styles = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 30px", backgroundColor: "#1e293b", borderBottom: "1px solid #334155", flexWrap: "wrap", gap: "10px" },
   tabBtn: { color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   btnNotif: { backgroundColor: "#eab308", color: "#0f172a", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
-  badgeNotifActive: { backgroundColor: "#10b98122", color: "#34d399", border: "1px solid #10b981", padding: "6px 12px", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold" },
+  badgeNotifToggle: { border: "1px solid", padding: "6px 12px", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", cursor: "pointer" },
   btnLogout: { backgroundColor: "#ef4444", color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   main: { maxWidth: "800px", margin: "30px auto", padding: "0 20px", display: "flex", flexDirection: "column", gap: "20px" },
   card: { backgroundColor: "#1e293b", padding: "20px", borderRadius: "10px", boxShadow: "0 4px 6px rgba(0, 0, 0, 0.3)" },
