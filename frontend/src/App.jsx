@@ -69,7 +69,16 @@ function App() {
   const fetchTasks = async () => {
     try {
       const res = await axios.get(`${API_BASE}/notifications/`, authHeader);
-      setTasks(res.data || []);
+      // Handles direct array or wrapped responses like { notifications: [] } or { tasks: [] }
+      let rawTasks = [];
+      if (Array.isArray(res.data)) {
+        rawTasks = res.data;
+      } else if (res.data && Array.isArray(res.data.notifications)) {
+        rawTasks = res.data.notifications;
+      } else if (res.data && Array.isArray(res.data.tasks)) {
+        rawTasks = res.data.tasks;
+      }
+      setTasks(rawTasks);
     } catch (err) {
       console.error("Fetch tasks error:", err);
     }
@@ -104,7 +113,6 @@ function App() {
     const endIso = new Date(endTime).toISOString();
 
     try {
-      // POST /tasks/ via Query Parameters as defined in FastAPI Swagger Specs
       await axios.post(
         `${API_BASE}/tasks/`,
         null,
@@ -162,7 +170,6 @@ function App() {
 
   const toggleTaskComplete = async (taskId) => {
     try {
-      // PUT /tasks/{task_id}/respond via Query Parameters
       await axios.put(
         `${API_BASE}/tasks/${taskId}/respond`,
         null,
@@ -216,8 +223,16 @@ function App() {
     );
   }
 
-  const activeTasks = tasks.filter((t) => t.status !== "completed");
-  const completedTasks = tasks.filter((t) => t.status === "completed");
+  // Robust Filter for Task Status
+  const activeTasks = tasks.filter((t) => {
+    const s = (t.status || t.state || "").toLowerCase();
+    return s !== "completed" && s !== "done";
+  });
+
+  const completedTasks = tasks.filter((t) => {
+    const s = (t.status || t.state || "").toLowerCase();
+    return s === "completed" || s === "done";
+  });
 
   return (
     <div style={styles.appContainer}>
@@ -250,7 +265,7 @@ function App() {
 
       {activeTab === "schedule" ? (
         <main style={styles.main}>
-          {/* Presets Card */}
+          {/* Quick Presets */}
           <section style={styles.card}>
             <h3>🚀 Quick Routine Presets</h3>
             <p style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "10px" }}>
@@ -302,19 +317,19 @@ function App() {
             </form>
           </section>
 
-          {/* Active Tasks */}
+          {/* Scheduled Active Tasks List */}
           <section style={styles.card}>
             <h3>📋 Scheduled Active Tasks ({activeTasks.length})</h3>
             {activeTasks.length === 0 ? (
               <p style={{ color: "#94a3b8" }}>No active tasks scheduled right now.</p>
             ) : (
               <div style={styles.taskList}>
-                {activeTasks.map((t) => (
-                  <div key={t.id || t.task_id} style={styles.taskCard}>
+                {activeTasks.map((t, idx) => (
+                  <div key={t.id || t.task_id || idx} style={styles.taskCard}>
                     <div>
-                      <strong style={{ fontSize: "1.1rem" }}>{t.title || t.task_name}</strong>
+                      <strong style={{ fontSize: "1.1rem" }}>{t.title || t.task_name || t.message || "Scheduled Task"}</strong>
                       <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0" }}>
-                        🕒 {new Date(t.scheduled_time || t.start_time).toLocaleString()}
+                        🕒 {t.scheduled_time || t.start_time ? new Date(t.scheduled_time || t.start_time).toLocaleString() : "Scheduled"}
                       </p>
                     </div>
                     <button
@@ -337,7 +352,7 @@ function App() {
             </p>
           </section>
 
-          {/* Insights */}
+          {/* Behavioral Insights */}
           <section style={{ ...styles.card, borderLeft: "4px solid #a855f7" }}>
             <h3>🧠 Adaptive Behavioral Insights</h3>
             <p style={{ marginTop: "8px" }}>
@@ -354,11 +369,11 @@ function App() {
               <p style={{ color: "#94a3b8" }}>No completed tasks recorded yet.</p>
             ) : (
               <div style={styles.taskList}>
-                {completedTasks.map((t) => (
-                  <div key={t.id || t.task_id} style={{ ...styles.taskCard, opacity: 0.85 }}>
+                {completedTasks.map((t, idx) => (
+                  <div key={t.id || t.task_id || idx} style={{ ...styles.taskCard, opacity: 0.85 }}>
                     <div>
                       <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
-                        {t.title || t.task_name}
+                        {t.title || t.task_name || "Completed Task"}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#34d399", margin: "4px 0" }}>
                         ✓ Completed
