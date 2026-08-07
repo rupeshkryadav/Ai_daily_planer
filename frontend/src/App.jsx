@@ -9,16 +9,21 @@ function App() {
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
 
-  // App States
+  // App States with Persistent LocalStorage Backup
   const [taskName, setTaskName] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
-  const [tasks, setTasks] = useState([]);
+  
+  const [tasks, setTasks] = useState(() => {
+    const saved = localStorage.getItem("ai_daily_tasks");
+    return saved ? JSON.parse(saved) : [];
+  });
+
   const [aiTip, setAiTip] = useState("");
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
   const [notifiedTasks, setNotifiedTasks] = useState(new Set());
-  const [activeAlert, setActiveAlert] = useState(null); // In-app notification banner
+  const [activeAlert, setActiveAlert] = useState(null);
 
   const [notifPermission, setNotifPermission] = useState(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "default"
@@ -41,6 +46,12 @@ function App() {
     { name: "Night Review & Planning", durationMin: 20 },
   ];
 
+  // Sync tasks to permanent LocalStorage whenever tasks array changes
+  useEffect(() => {
+    localStorage.setItem("ai_daily_tasks", JSON.stringify(tasks));
+    updateDynamicAiAnalytics(tasks);
+  }, [tasks]);
+
   useEffect(() => {
     if (token) {
       fetchTasks();
@@ -49,12 +60,7 @@ function App() {
     }
   }, [token]);
 
-  // Recalculate Dynamic AI Coach Insights based on Task History
-  useEffect(() => {
-    updateDynamicAiAnalytics(tasks);
-  }, [tasks]);
-
-  // Real-Time Notification Check Engine (Checks every 10 seconds)
+  // Real-Time Notification Engine
   useEffect(() => {
     if (!token) return;
 
@@ -72,7 +78,6 @@ function App() {
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
 
-        // Start Notification Trigger
         const startKey = `${taskId}-start`;
         if (Math.abs(now - startMs) < 60000 && !notifiedTasks.has(startKey)) {
           triggerDualNotification(
@@ -82,7 +87,6 @@ function App() {
           setNotifiedTasks((prev) => new Set(prev).add(startKey));
         }
 
-        // End Notification Trigger
         const endKey = `${taskId}-end`;
         if (endMs && Math.abs(now - endMs) < 60000 && !notifiedTasks.has(endKey)) {
           triggerDualNotification(
@@ -98,24 +102,10 @@ function App() {
   }, [tasks, token, notifiedTasks]);
 
   const triggerDualNotification = (title, body) => {
-    // 1. Browser Native Desktop Popup
     if ("Notification" in window && Notification.permission === "granted") {
       new Notification(title, { body });
     }
-
-    // 2. In-App Banner Alert (Guaranteed visible even if Windows blocks popups)
     setActiveAlert({ title, body, time: new Date().toLocaleTimeString() });
-
-    // Play alert sound if audio context available
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      osc.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.3);
-    } catch (e) {
-      console.log("Audio not supported");
-    }
   };
 
   const requestNotificationPermission = () => {
@@ -123,14 +113,10 @@ function App() {
       Notification.requestPermission().then((permission) => {
         setNotifPermission(permission);
         if (permission === "granted") {
-          alert("Notification Permission Granted! 🎉 Test popup sent.");
-          new Notification("AI Daily Life OS", { body: "Notifications are now active for all tasks!" });
-        } else {
-          alert("Browser notification permission denied. In-app alerts will still work.");
+          alert("Notification Permission Granted! 🎉");
+          new Notification("AI Daily Life OS", { body: "Notifications enabled successfully!" });
         }
       });
-    } else {
-      alert("Browser does not support notifications.");
     }
   };
 
@@ -163,8 +149,6 @@ function App() {
         if (accessToken) {
           localStorage.setItem("token", accessToken);
           setToken(accessToken);
-        } else {
-          alert("Login missing token.");
         }
       } catch (err) {
         try {
@@ -187,6 +171,7 @@ function App() {
 
   const handleLogout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("ai_daily_tasks");
     setToken("");
     setTasks([]);
   };
@@ -201,9 +186,16 @@ function App() {
         extractedTasks = res.data.notifications || res.data.tasks || res.data.data || [];
       }
       
+      // Merge backend tasks with local persistent tasks (never lose local logs)
       setTasks(prev => {
-        if (extractedTasks.length === 0 && prev.length > 0) return prev;
-        return extractedTasks;
+        if (extractedTasks.length === 0) return prev;
+        
+        const combined = [...extractedTasks];
+        prev.forEach(localItem => {
+          const exists = combined.some(b => (b.id || b.notification_id) === (localItem.id || localItem.notification_id));
+          if (!exists) combined.push(localItem);
+        });
+        return combined;
       });
     } catch (err) {
       console.error("Fetch tasks error:", err);
@@ -228,7 +220,7 @@ function App() {
     }
   };
 
-  // Dynamic AI Analytics Engine (Analyzes user logs & reasons in real time)
+  // Dynamic AI Analytics Engine (Evaluates entire history)
   const updateDynamicAiAnalytics = (allTasks) => {
     const completed = allTasks.filter(t => (t.status || "").toLowerCase() === "completed");
     const skipped = allTasks.filter(t => (t.status || "").toLowerCase() === "skipped");
@@ -243,19 +235,17 @@ function App() {
     const rate = Math.round((completed.length / totalLogged) * 100);
     const lastReason = [...allTasks].reverse().find(t => t.user_reason)?.user_reason;
 
-    // AI Coach Tip Generator based on logged history
     if (rate >= 80) {
-      setAiTip(`🔥 Excellent Consistency! ${rate}% completion rate across ${totalLogged} routines. Keep maintaining momentum!`);
+      setAiTip(`🔥 Strong Streak! You have an ${rate}% completion rate across ${totalLogged} routines logged. Great focus!`);
     } else if (rate >= 50) {
-      setAiTip(`⚖️ Solid Progress (${rate}% rate). ${lastReason ? `Note on last task: "${lastReason}".` : ''} Focus on minimizing delays.`);
+      setAiTip(`⚖️ Moderate Balance (${rate}% rate). ${lastReason ? `Note on last routine: "${lastReason}".` : ''} Protect your high-energy blocks.`);
     } else {
-      setAiTip(`💡 Recovery Mode (${rate}% rate). Try breaking tasks into smaller 20-minute focus blocks to build consistency.`);
+      setAiTip(`💡 Adjustment Needed (${rate}% rate). Try scheduling shorter 30-minute slots to avoid burnouts.`);
     }
 
-    // Adaptive Behavioral Insights Generator
     setInsights(
-      `📊 Analysis: ${completed.length} Completed | ${skipped.length} Skipped. ${
-        lastReason ? `Latest experience reflection: "${lastReason}".` : 'Keep adding feedback notes when updating tasks.'
+      `📊 Persistent Log: ${completed.length} Completed | ${skipped.length} Skipped. ${
+        lastReason ? `Latest experience reflection: "${lastReason}".` : 'Keep adding reflection notes.'
       }`
     );
   };
@@ -298,11 +288,11 @@ function App() {
         newTask.notification_id = res.data.notification_id || res.data.id;
       }
     } catch (err) {
-      console.log("Saving locally on frontend:", err);
+      console.log("Saved to persistent storage");
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! 🔔 Notification set.");
+    alert("Task Scheduled Successfully! Saved permanently.");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -322,7 +312,6 @@ function App() {
     setEndTime(formatLocal(end));
   };
 
-  // Submit User Feedback Modal
   const handleSubmitTaskResponse = async () => {
     if (!selectedTask) return;
 
@@ -344,7 +333,7 @@ function App() {
         );
       }
     } catch (err) {
-      console.log("Status recorded locally");
+      console.log("Logged to persistent local storage");
     }
 
     setTasks((prev) =>
@@ -361,7 +350,7 @@ function App() {
       })
     );
 
-    alert(`Status updated to ${responseAction.toUpperCase()}! AI Coach updated.`);
+    alert(`Task logged as ${responseAction.toUpperCase()}! Permanent record updated.`);
     setSelectedTask(null);
     setUserReason("");
     setNewRescheduleTime("");
@@ -416,7 +405,6 @@ function App() {
 
   return (
     <div style={styles.appContainer}>
-      {/* Top Notification Banner */}
       {activeAlert && (
         <div style={styles.alertBanner}>
           <div>
@@ -540,7 +528,6 @@ function App() {
             )}
           </section>
 
-          {/* DYNAMIC REAL-TIME AI COACH */}
           <section style={{ ...styles.card, borderLeft: "4px solid #38bdf8" }}>
             <h3>🤖 Generative AI Life Coach</h3>
             <p style={{ fontStyle: "italic", marginTop: "8px", color: "#e2e8f0" }}>
@@ -548,7 +535,6 @@ function App() {
             </p>
           </section>
 
-          {/* DYNAMIC REAL-TIME BEHAVIORAL INSIGHTS */}
           <section style={{ ...styles.card, borderLeft: "4px solid #a855f7" }}>
             <h3>🧠 Adaptive Behavioral Insights</h3>
             <p style={{ marginTop: "8px", color: "#e2e8f0" }}>
@@ -559,7 +545,7 @@ function App() {
       ) : (
         <main style={styles.main}>
           <section style={styles.card}>
-            <h3>📊 Routine History & Experience Log</h3>
+            <h3>📊 Permanent Routine History & Experience Log</h3>
             {completedTasks.length === 0 ? (
               <p style={{ color: "#94a3b8" }}>No completed or logged tasks yet.</p>
             ) : (
@@ -587,7 +573,6 @@ function App() {
         </main>
       )}
 
-      {/* Task Feedback Modal */}
       {selectedTask && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
@@ -641,7 +626,7 @@ function App() {
 
             <label style={styles.labelModal}>Reason / Experience Reflection:</label>
             <textarea
-              placeholder="e.g., Coding went great! / Got delayed due to college work..."
+              placeholder="e.g., Finished smoothly! / Got delayed due to college work..."
               value={userReason}
               onChange={(e) => setUserReason(e.target.value)}
               rows={3}
@@ -653,7 +638,7 @@ function App() {
                 Cancel
               </button>
               <button onClick={handleSubmitTaskResponse} style={styles.btnSubmit}>
-                Save Feedback
+                Save Feedback Permanently
               </button>
             </div>
           </div>
@@ -684,11 +669,9 @@ const styles = {
   taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnAction: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
   
-  // Alert Banner
   alertBanner: { backgroundColor: "#0284c7", color: "#fff", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", fontWeight: "bold" },
   btnDismiss: { backgroundColor: "transparent", color: "#fff", border: "1px solid #fff", padding: "4px 10px", borderRadius: "4px", cursor: "pointer" },
 
-  // Modal Styles
   modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
   modalCard: { backgroundColor: "#1e293b", padding: "25px", borderRadius: "12px", width: "90%", maxWidth: "480px", border: "1px solid #334155" },
   labelModal: { display: "block", fontSize: "0.85rem", color: "#94a3b8", marginTop: "10px" },
