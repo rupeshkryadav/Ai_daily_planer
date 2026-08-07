@@ -92,43 +92,36 @@ function App() {
       return;
     }
 
-    // Format dates to ISO with seconds
     const startIso = new Date(startTime).toISOString();
     const endIso = new Date(endTime).toISOString();
 
-    const payload = {
-      task_name: taskName,
-      start_time: startIso,
-      expected_end_time: endIso,
-    };
-
     try {
-      await axios.post(`${API_BASE}/tasks`, payload, authHeader);
+      // Backend expects Query Parameters with exact schema: title, scheduled_time, expected_end_time
+      await axios.post(`${API_BASE}/schedule-task`, null, {
+        params: {
+          title: taskName,
+          scheduled_time: startIso,
+          expected_end_time: endIso,
+        },
+        headers: { Authorization: `Bearer ${token}` },
+      });
       resetTaskForm();
     } catch (err) {
-      if (err.response?.status === 404) {
-        try {
-          await axios.post(`${API_BASE}/schedule-task`, payload, authHeader);
-          resetTaskForm();
-        } catch (innerErr) {
-          handleApiError(innerErr);
-        }
-      } else {
-        handleApiError(err);
+      // Fallback: Try sending as JSON Body if query params fail
+      try {
+        await axios.post(
+          `${API_BASE}/schedule-task`,
+          {
+            title: taskName,
+            scheduled_time: startIso,
+            expected_end_time: endIso,
+          },
+          authHeader
+        );
+        resetTaskForm();
+      } catch (innerErr) {
+        handleApiError(innerErr);
       }
-    }
-  };
-
-  const handleApiError = (err) => {
-    const detail = err.response?.data?.detail;
-    if (typeof detail === 'string') {
-      alert(detail);
-    } else if (Array.isArray(detail)) {
-      // Handles FastAPI 422 validation array error cleanly
-      const msg = detail.map(item => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
-      alert(`Validation Error:\n${msg}`);
-    } else {
-      alert("Failed to schedule task. Check backend schema.");
     }
   };
 
