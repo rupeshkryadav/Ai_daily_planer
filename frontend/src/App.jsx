@@ -42,7 +42,7 @@ function App() {
     try {
       const res = await axios.post(`${API_BASE}${endpoint}`, { email, password });
       if (isSignUp) {
-        alert("Account created! Please log in.");
+        alert("Account created successfully! Please log in.");
         setIsSignUp(false);
       } else {
         localStorage.setItem("token", res.data.access_token);
@@ -63,7 +63,7 @@ function App() {
       const res = await axios.get(`${API_BASE}/tasks`, authHeader);
       setTasks(res.data || []);
     } catch (err) {
-      console.error(err);
+      console.error("Error fetching tasks:", err);
     }
   };
 
@@ -72,7 +72,7 @@ function App() {
       const res = await axios.get(`${API_BASE}/ai-coach`, authHeader);
       setAiTip(res.data.tip || res.data.message || "");
     } catch (err) {
-      console.error(err);
+      console.error("Error fetching AI coach tip:", err);
     }
   };
 
@@ -81,7 +81,7 @@ function App() {
       const res = await axios.get(`${API_BASE}/behavioral-insights`, authHeader);
       setInsights(res.data.insight || res.data.message || "");
     } catch (err) {
-      console.error(err);
+      console.error("Error fetching insights:", err);
     }
   };
 
@@ -91,31 +91,44 @@ function App() {
       alert("Please fill all task fields");
       return;
     }
+
+    const payload = {
+      task_name: taskName,
+      start_time: new Date(startTime).toISOString(),
+      expected_end_time: new Date(endTime).toISOString(),
+    };
+
+    // Try primary route `/tasks` first, fallback to `/schedule-task` if backend uses legacy route
     try {
-      await axios.post(
-        `${API_BASE}/schedule-task`,
-        {
-          task_name: taskName,
-          start_time: new Date(startTime).toISOString(),
-          expected_end_time: new Date(endTime).toISOString(),
-        },
-        authHeader
-      );
-      setTaskName("");
-      setStartTime("");
-      setEndTime("");
-      fetchTasks();
-      fetchAiCoach();
+      await axios.post(`${API_BASE}/tasks`, payload, authHeader);
+      resetTaskForm();
     } catch (err) {
-      alert(err.response?.data?.detail || "Failed to schedule task");
+      if (err.response?.status === 404) {
+        try {
+          await axios.post(`${API_BASE}/schedule-task`, payload, authHeader);
+          resetTaskForm();
+        } catch (innerErr) {
+          alert(innerErr.response?.data?.detail || "Failed to schedule task");
+        }
+      } else {
+        alert(err.response?.data?.detail || "Failed to schedule task");
+      }
     }
+  };
+
+  const resetTaskForm = () => {
+    setTaskName("");
+    setStartTime("");
+    setEndTime("");
+    fetchTasks();
+    fetchAiCoach();
+    fetchInsights();
   };
 
   const applyPreset = (preset) => {
     const now = new Date();
     const end = new Date(now.getTime() + preset.durationMin * 60000);
-    
-    // Format to YYYY-MM-DDTHH:MM for datetime-local input
+
     const formatLocal = (d) => {
       const pad = (n) => (n < 10 ? '0' + n : n);
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -128,16 +141,30 @@ function App() {
 
   const toggleTaskComplete = async (taskId, currentStatus) => {
     try {
+      const newStatus = currentStatus === "Completed" ? "Pending" : "Completed";
       await axios.patch(
         `${API_BASE}/tasks/${taskId}`,
-        { status: currentStatus === "Completed" ? "Pending" : "Completed" },
+        { status: newStatus },
         authHeader
       );
       fetchTasks();
       fetchAiCoach();
       fetchInsights();
     } catch (err) {
-      alert("Failed to update task status");
+      // Fallback to PUT if PATCH isn't defined
+      try {
+        const newStatus = currentStatus === "Completed" ? "Pending" : "Completed";
+        await axios.put(
+          `${API_BASE}/tasks/${taskId}`,
+          { status: newStatus },
+          authHeader
+        );
+        fetchTasks();
+        fetchAiCoach();
+        fetchInsights();
+      } catch (innerErr) {
+        alert("Failed to update task status");
+      }
     }
   };
 
