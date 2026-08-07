@@ -69,16 +69,15 @@ function App() {
   const fetchTasks = async () => {
     try {
       const res = await axios.get(`${API_BASE}/notifications/`, authHeader);
-      // Handles direct array or wrapped responses like { notifications: [] } or { tasks: [] }
-      let rawTasks = [];
+      console.log("Raw Notifications API Response:", res.data);
+
+      let extractedTasks = [];
       if (Array.isArray(res.data)) {
-        rawTasks = res.data;
-      } else if (res.data && Array.isArray(res.data.notifications)) {
-        rawTasks = res.data.notifications;
-      } else if (res.data && Array.isArray(res.data.tasks)) {
-        rawTasks = res.data.tasks;
+        extractedTasks = res.data;
+      } else if (res.data && typeof res.data === 'object') {
+        extractedTasks = res.data.notifications || res.data.tasks || res.data.data || [];
       }
-      setTasks(rawTasks);
+      setTasks(extractedTasks);
     } catch (err) {
       console.error("Fetch tasks error:", err);
     }
@@ -223,14 +222,14 @@ function App() {
     );
   }
 
-  // Robust Filter for Task Status
+  // Universal Filter that accepts both raw array tasks or notification wrapped objects
   const activeTasks = tasks.filter((t) => {
-    const s = (t.status || t.state || "").toLowerCase();
+    const s = (t.status || t.state || t.user_response || "").toLowerCase();
     return s !== "completed" && s !== "done";
   });
 
   const completedTasks = tasks.filter((t) => {
-    const s = (t.status || t.state || "").toLowerCase();
+    const s = (t.status || t.state || t.user_response || "").toLowerCase();
     return s === "completed" || s === "done";
   });
 
@@ -319,15 +318,17 @@ function App() {
 
           {/* Scheduled Active Tasks List */}
           <section style={styles.card}>
-            <h3>📋 Scheduled Active Tasks ({activeTasks.length})</h3>
-            {activeTasks.length === 0 ? (
+            <h3>📋 Scheduled Active Tasks ({tasks.length > 0 ? activeTasks.length : 0})</h3>
+            {tasks.length === 0 || activeTasks.length === 0 ? (
               <p style={{ color: "#94a3b8" }}>No active tasks scheduled right now.</p>
             ) : (
               <div style={styles.taskList}>
                 {activeTasks.map((t, idx) => (
                   <div key={t.id || t.task_id || idx} style={styles.taskCard}>
                     <div>
-                      <strong style={{ fontSize: "1.1rem" }}>{t.title || t.task_name || t.message || "Scheduled Task"}</strong>
+                      <strong style={{ fontSize: "1.1rem" }}>
+                        {t.title || t.task_name || t.message || "Scheduled Task"}
+                      </strong>
                       <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0" }}>
                         🕒 {t.scheduled_time || t.start_time ? new Date(t.scheduled_time || t.start_time).toLocaleString() : "Scheduled"}
                       </p>
@@ -344,7 +345,7 @@ function App() {
             )}
           </section>
 
-          {/* AI Coach */}
+          {/* AI Coach Card */}
           <section style={{ ...styles.card, borderLeft: "4px solid #38bdf8" }}>
             <h3>🤖 Generative AI Life Coach</h3>
             <p style={{ fontStyle: "italic", marginTop: "8px" }}>
@@ -373,7 +374,7 @@ function App() {
                   <div key={t.id || t.task_id || idx} style={{ ...styles.taskCard, opacity: 0.85 }}>
                     <div>
                       <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
-                        {t.title || t.task_name || "Completed Task"}
+                        {t.title || t.task_name || t.message || "Completed Task"}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#34d399", margin: "4px 0" }}>
                         ✓ Completed
