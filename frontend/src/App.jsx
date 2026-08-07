@@ -28,9 +28,13 @@ function App() {
   });
   const [activeAlert, setActiveAlert] = useState(null);
 
-  const [notifPermission, setNotifPermission] = useState(
-    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "default"
-  );
+  // Permanent Notification Permission Check
+  const [notifPermission, setNotifPermission] = useState(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      return Notification.permission;
+    }
+    return "default";
+  });
 
   // Modal State for Task Response
   const [selectedTask, setSelectedTask] = useState(null);
@@ -48,6 +52,13 @@ function App() {
     { name: "Reading & Learning Slot", durationMin: 30 },
     { name: "Night Review & Planning", durationMin: 20 },
   ];
+
+  // Auto Check Permission Status on Mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      setNotifPermission(Notification.permission);
+    }
+  }, []);
 
   // Sync tasks to permanent LocalStorage
   useEffect(() => {
@@ -79,7 +90,7 @@ function App() {
       const gain = ctx.createGain();
       
       osc.type = "sine";
-      osc.frequency.setValueAtTime(880, ctx.currentTime); // A5 note
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
       gain.gain.setValueAtTime(0.1, ctx.currentTime);
       
       osc.connect(gain);
@@ -92,7 +103,7 @@ function App() {
     }
   };
 
-  // Real-Time Notification Check Engine (Runs every 10 seconds)
+  // Real-Time Permanent Notification Check Engine (Runs every 10 seconds for ALL tasks)
   useEffect(() => {
     if (!token) return;
 
@@ -110,7 +121,7 @@ function App() {
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
 
-        // 1. START TIME ALERT (Triggers when start time arrives)
+        // 1. START TIME ALERT
         const startKey = `${taskId}-start`;
         if (now >= startMs && now < startMs + 90000 && !notifiedTasks.has(startKey)) {
           triggerDualNotification(
@@ -120,7 +131,7 @@ function App() {
           setNotifiedTasks((prev) => new Set(prev).add(startKey));
         }
 
-        // 2. END TIME ALERT (Triggers when expected end time arrives)
+        // 2. END TIME ALERT
         const endKey = `${taskId}-end`;
         if (endMs && now >= endMs && now < endMs + 90000 && !notifiedTasks.has(endKey)) {
           triggerDualNotification(
@@ -150,8 +161,8 @@ function App() {
         setNotifPermission(permission);
         if (permission === "granted") {
           playAlertSound();
-          alert("Notification & Audio Sound Enabled! 🎉");
-          new Notification("AI Daily Life OS", { body: "Notifications and alerts are active!" });
+          alert("Notifications permanently enabled for all tasks! 🎉");
+          new Notification("AI Daily Life OS", { body: "Automatic alerts are active for every scheduled task." });
         }
       });
     }
@@ -328,7 +339,7 @@ function App() {
     }
 
     setTasks((prev) => [newTask, ...prev]);
-    alert("Task Scheduled Successfully! Start and End alerts set.");
+    alert("Task Scheduled Successfully! Automatic notifications enabled for this task.");
     setTaskName("");
     setStartTime("");
     setEndTime("");
@@ -454,9 +465,15 @@ function App() {
       <header style={styles.header}>
         <h1 style={{ fontSize: "1.5rem" }}>⚡ AI Daily Life OS</h1>
         <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <button onClick={requestNotificationPermission} style={styles.btnNotif}>
-            🔔 Enable Notifications & Sound
-          </button>
+          {notifPermission !== "granted" ? (
+            <button onClick={requestNotificationPermission} style={styles.btnNotif}>
+              🔔 Enable Notifications & Sound
+            </button>
+          ) : (
+            <span style={styles.badgeNotifActive}>
+              🟢 Notifications Active
+            </span>
+          )}
           <button
             onClick={() => setActiveTab("schedule")}
             style={{
@@ -689,6 +706,7 @@ const styles = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 30px", backgroundColor: "#1e293b", borderBottom: "1px solid #334155", flexWrap: "wrap", gap: "10px" },
   tabBtn: { color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   btnNotif: { backgroundColor: "#eab308", color: "#0f172a", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
+  badgeNotifActive: { backgroundColor: "#10b98122", color: "#34d399", border: "1px solid #10b981", padding: "6px 12px", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold" },
   btnLogout: { backgroundColor: "#ef4444", color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   main: { maxWidth: "800px", margin: "30px auto", padding: "0 20px", display: "flex", flexDirection: "column", gap: "20px" },
   card: { backgroundColor: "#1e293b", padding: "20px", borderRadius: "10px", boxShadow: "0 4px 6px rgba(0, 0, 0, 0.3)" },
