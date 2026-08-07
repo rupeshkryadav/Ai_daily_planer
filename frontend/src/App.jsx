@@ -46,7 +46,6 @@ function App() {
     const cleanEmail = email.trim();
 
     if (isSignUp) {
-      // Signup Attempt (Try Body first, fallback to params)
       try {
         await axios.post(`${API_BASE}/signup`, { email: cleanEmail, password: password });
         alert("Account created successfully! 🎉 Please log in now.");
@@ -63,15 +62,10 @@ function App() {
         }
       }
     } else {
-      // Login Attempt (Backend expects Query Params: username, password)
       try {
         const res = await axios.post(`${API_BASE}/login`, null, {
-          params: {
-            username: cleanEmail,
-            password: password,
-          }
+          params: { username: cleanEmail, password: password }
         });
-
         const accessToken = res.data.access_token || res.data.token;
         if (accessToken) {
           localStorage.setItem("token", accessToken);
@@ -80,7 +74,6 @@ function App() {
           alert("Login response missing token.");
         }
       } catch (err) {
-        // Fallback: Try JSON Body if query params fail
         try {
           const resBody = await axios.post(`${API_BASE}/login`, {
             email: cleanEmail,
@@ -170,25 +163,24 @@ function App() {
             scheduled_time: startIso,
             expected_end_time: endIso,
           },
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { Authorization: `Bearer ${token}` },
         }
       );
       alert("Task Scheduled Successfully! 🎉");
-      resetTaskForm();
+      setTaskName("");
+      setStartTime("");
+      setEndTime("");
+      
+      // Delay fetch slightly to allow backend notification generation
+      setTimeout(() => {
+        fetchTasks();
+        fetchAiCoach();
+        fetchInsights();
+      }, 1000);
+
     } catch (err) {
       handleApiError(err);
     }
-  };
-
-  const resetTaskForm = () => {
-    setTaskName("");
-    setStartTime("");
-    setEndTime("");
-    fetchTasks();
-    fetchAiCoach();
-    fetchInsights();
   };
 
   const applyPreset = (preset) => {
@@ -205,21 +197,30 @@ function App() {
     setEndTime(formatLocal(end));
   };
 
-  const toggleTaskComplete = async (taskId) => {
+  const toggleTaskComplete = async (item) => {
+    // Extract valid ID across notification_id, task_id, or id
+    const targetId = item.notification_id || item.task_id || item.id;
+    
+    if (!targetId) {
+      alert("Task ID not found");
+      return;
+    }
+
     try {
       await axios.put(
-        `${API_BASE}/tasks/${taskId}/respond`,
+        `${API_BASE}/tasks/${targetId}/respond`,
         null,
         {
           params: { user_response: "completed" },
           headers: { Authorization: `Bearer ${token}` },
         }
       );
+      alert("Status updated successfully! ✓");
       fetchTasks();
       fetchAiCoach();
       fetchInsights();
     } catch (err) {
-      alert("Failed to update task status");
+      handleApiError(err);
     }
   };
 
@@ -358,17 +359,17 @@ function App() {
             ) : (
               <div style={styles.taskList}>
                 {activeTasks.map((t, idx) => (
-                  <div key={t.id || t.task_id || idx} style={styles.taskCard}>
+                  <div key={t.notification_id || t.task_id || t.id || idx} style={styles.taskCard}>
                     <div>
                       <strong style={{ fontSize: "1.1rem" }}>
-                        {t.title || t.task_name || t.message || "Scheduled Task"}
+                        {t.message || t.title || t.task_name || "Scheduled Task"}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0" }}>
                         🕒 {t.scheduled_time || t.start_time ? new Date(t.scheduled_time || t.start_time).toLocaleString() : "Scheduled"}
                       </p>
                     </div>
                     <button
-                      onClick={() => toggleTaskComplete(t.id || t.task_id)}
+                      onClick={() => toggleTaskComplete(t)}
                       style={styles.btnComplete}
                     >
                       Mark Complete ✓
@@ -402,10 +403,10 @@ function App() {
             ) : (
               <div style={styles.taskList}>
                 {completedTasks.map((t, idx) => (
-                  <div key={t.id || t.task_id || idx} style={{ ...styles.taskCard, opacity: 0.85 }}>
+                  <div key={t.notification_id || t.task_id || t.id || idx} style={{ ...styles.taskCard, opacity: 0.85 }}>
                     <div>
                       <strong style={{ textDecoration: "line-through", fontSize: "1.1rem" }}>
-                        {t.title || t.task_name || t.message || "Completed Task"}
+                        {t.message || t.title || t.task_name || "Completed Task"}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#34d399", margin: "4px 0" }}>
                         ✓ Completed
@@ -439,7 +440,7 @@ const styles = {
   input: { width: "100%", padding: "10px", borderRadius: "6px", border: "1px solid #334155", backgroundColor: "#0f172a", color: "#fff", boxSizing: "border-box" },
   btnPrimary: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   taskList: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" },
-  taskCard: { display: "flex", justify: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
+  taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnComplete: { backgroundColor: "#10b981", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
 };
 
