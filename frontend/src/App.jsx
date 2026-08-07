@@ -92,13 +92,16 @@ function App() {
       return;
     }
 
+    // Format dates to ISO with seconds
+    const startIso = new Date(startTime).toISOString();
+    const endIso = new Date(endTime).toISOString();
+
     const payload = {
       task_name: taskName,
-      start_time: new Date(startTime).toISOString(),
-      expected_end_time: new Date(endTime).toISOString(),
+      start_time: startIso,
+      expected_end_time: endIso,
     };
 
-    // Try primary route `/tasks` first, fallback to `/schedule-task` if backend uses legacy route
     try {
       await axios.post(`${API_BASE}/tasks`, payload, authHeader);
       resetTaskForm();
@@ -108,11 +111,24 @@ function App() {
           await axios.post(`${API_BASE}/schedule-task`, payload, authHeader);
           resetTaskForm();
         } catch (innerErr) {
-          alert(innerErr.response?.data?.detail || "Failed to schedule task");
+          handleApiError(innerErr);
         }
       } else {
-        alert(err.response?.data?.detail || "Failed to schedule task");
+        handleApiError(err);
       }
+    }
+  };
+
+  const handleApiError = (err) => {
+    const detail = err.response?.data?.detail;
+    if (typeof detail === 'string') {
+      alert(detail);
+    } else if (Array.isArray(detail)) {
+      // Handles FastAPI 422 validation array error cleanly
+      const msg = detail.map(item => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
+      alert(`Validation Error:\n${msg}`);
+    } else {
+      alert("Failed to schedule task. Check backend schema.");
     }
   };
 
