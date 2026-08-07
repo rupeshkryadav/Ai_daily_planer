@@ -43,36 +43,71 @@ function App() {
 
   const handleAuth = async (e) => {
     e.preventDefault();
-    const endpoint = isSignUp ? "/signup" : "/login";
-    try {
-      const res = await axios.post(`${API_BASE}${endpoint}`, { 
-        email: email.trim(), 
-        password: password 
-      });
+    const cleanEmail = email.trim();
 
-      if (isSignUp) {
-        alert("Account created successfully! 🎉 Please switch to Log In now.");
+    if (isSignUp) {
+      // Signup Attempt (Try Body first, fallback to params)
+      try {
+        await axios.post(`${API_BASE}/signup`, { email: cleanEmail, password: password });
+        alert("Account created successfully! 🎉 Please log in now.");
         setIsSignUp(false);
-      } else {
+      } catch (err) {
+        try {
+          await axios.post(`${API_BASE}/signup`, null, {
+            params: { username: cleanEmail, password: password, email: cleanEmail }
+          });
+          alert("Account created successfully! 🎉 Please log in now.");
+          setIsSignUp(false);
+        } catch (innerErr) {
+          handleApiError(innerErr);
+        }
+      }
+    } else {
+      // Login Attempt (Backend expects Query Params: username, password)
+      try {
+        const res = await axios.post(`${API_BASE}/login`, null, {
+          params: {
+            username: cleanEmail,
+            password: password,
+          }
+        });
+
         const accessToken = res.data.access_token || res.data.token;
         if (accessToken) {
           localStorage.setItem("token", accessToken);
           setToken(accessToken);
         } else {
-          alert("Login succeeded but no token received.");
+          alert("Login response missing token.");
+        }
+      } catch (err) {
+        // Fallback: Try JSON Body if query params fail
+        try {
+          const resBody = await axios.post(`${API_BASE}/login`, {
+            email: cleanEmail,
+            username: cleanEmail,
+            password: password,
+          });
+          const accessToken = resBody.data.access_token || resBody.data.token;
+          if (accessToken) {
+            localStorage.setItem("token", accessToken);
+            setToken(accessToken);
+          }
+        } catch (innerErr) {
+          handleApiError(innerErr);
         }
       }
-    } catch (err) {
-      console.error("Auth error detail:", err.response);
-      const detail = err.response?.data?.detail;
-      if (typeof detail === 'string') {
-        alert(`Auth Error: ${detail}`);
-      } else if (Array.isArray(detail)) {
-        const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
-        alert(`Validation Error:\n${msg}`);
-      } else {
-        alert(`Status ${err.response?.status || 'Error'}: Account may already exist or backend issue.`);
-      }
+    }
+  };
+
+  const handleApiError = (err) => {
+    const detail = err.response?.data?.detail;
+    if (typeof detail === 'string') {
+      alert(`Backend Error: ${detail}`);
+    } else if (Array.isArray(detail)) {
+      const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
+      alert(`Validation Error:\n${msg}`);
+    } else {
+      alert(`Status ${err.response?.status || 'Error'}: Action failed.`);
     }
   };
 
@@ -143,16 +178,7 @@ function App() {
       alert("Task Scheduled Successfully! 🎉");
       resetTaskForm();
     } catch (err) {
-      console.error("Schedule error:", err);
-      const detail = err.response?.data?.detail;
-      if (typeof detail === 'string') {
-        alert(`Backend Error: ${detail}`);
-      } else if (Array.isArray(detail)) {
-        const msg = detail.map((item) => `${item.loc?.join('.') || 'field'}: ${item.msg}`).join('\n');
-        alert(`Validation Error:\n${msg}`);
-      } else {
-        alert(`Error Status ${err.response?.status || 'Unknown'}`);
-      }
+      handleApiError(err);
     }
   };
 
@@ -204,8 +230,8 @@ function App() {
           <h2 style={{ marginBottom: "20px" }}>{isSignUp ? "Create Account" : "Welcome Back"}</h2>
           <form onSubmit={handleAuth} style={styles.form}>
             <input
-              type="email"
-              placeholder="Email Address"
+              type="text"
+              placeholder="Email or Username"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -413,7 +439,7 @@ const styles = {
   input: { width: "100%", padding: "10px", borderRadius: "6px", border: "1px solid #334155", backgroundColor: "#0f172a", color: "#fff", boxSizing: "border-box" },
   btnPrimary: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   taskList: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" },
-  taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
+  taskCard: { display: "flex", justify: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnComplete: { backgroundColor: "#10b981", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
 };
 
