@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 const API_BASE = "https://ai-daily-backend-ldjh.onrender.com";
 
@@ -9,11 +10,10 @@ function App() {
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
 
-  // App States with Persistent LocalStorage Backup
   const [taskName, setTaskName] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
-  
+
   const [tasks, setTasks] = useState(() => {
     const saved = localStorage.getItem("ai_daily_tasks");
     return saved ? JSON.parse(saved) : [];
@@ -22,28 +22,14 @@ function App() {
   const [aiTip, setAiTip] = useState("");
   const [insights, setInsights] = useState("");
   const [activeTab, setActiveTab] = useState("schedule");
-  const [notifiedTasks, setNotifiedTasks] = useState(() => {
-    const saved = localStorage.getItem("ai_notified_keys");
-    return saved ? new Set(JSON.parse(saved)) : new Set();
-  });
   const [activeAlert, setActiveAlert] = useState(null);
 
-  // User Mute Preference State (Saved in LocalStorage)
   const [isMuted, setIsMuted] = useState(() => {
     return localStorage.getItem("ai_app_muted") === "true";
   });
 
-  // Browser Permission State
-  const [notifPermission, setNotifPermission] = useState(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      return Notification.permission;
-    }
-    return "default";
-  });
-
-  // Modal State for Task Response
   const [selectedTask, setSelectedTask] = useState(null);
-  const [responseAction, setResponseAction] = useState("completed"); 
+  const [responseAction, setResponseAction] = useState("completed");
   const [userReason, setUserReason] = useState("");
   const [newRescheduleTime, setNewRescheduleTime] = useState("");
 
@@ -59,26 +45,26 @@ function App() {
   ];
 
   useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      setNotifPermission(Notification.permission);
-    }
+    const requestNativeNotifPermission = async () => {
+      try {
+        if (typeof window !== "undefined" && 'Capacitor' in window) {
+          await LocalNotifications.requestPermissions();
+        }
+      } catch (e) {
+        console.log("Not running in native capacitor shell");
+      }
+    };
+    requestNativeNotifPermission();
   }, []);
 
-  // Save Mute Preference to LocalStorage
   useEffect(() => {
     localStorage.setItem("ai_app_muted", isMuted);
   }, [isMuted]);
 
-  // Sync tasks to permanent LocalStorage
   useEffect(() => {
     localStorage.setItem("ai_daily_tasks", JSON.stringify(tasks));
     updateDynamicAiAnalytics(tasks);
   }, [tasks]);
-
-  // Sync notified keys to permanent LocalStorage
-  useEffect(() => {
-    localStorage.setItem("ai_notified_keys", JSON.stringify(Array.from(notifiedTasks)));
-  }, [notifiedTasks]);
 
   useEffect(() => {
     if (token) {
@@ -88,24 +74,23 @@ function App() {
     }
   }, [token]);
 
-  // Audio Synthesizer Beep (Respects isMuted)
   const playAlertSound = () => {
-    if (isMuted) return; // Don't play if user muted
+    if (isMuted) return;
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      
+
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      
+
       osc.type = "sine";
       osc.frequency.setValueAtTime(880, ctx.currentTime);
       gain.gain.setValueAtTime(0.1, ctx.currentTime);
-      
+
       osc.connect(gain);
       gain.connect(ctx.destination);
-      
+
       osc.start();
       osc.stop(ctx.currentTime + 0.4);
     } catch (e) {
@@ -113,70 +98,82 @@ function App() {
     }
   };
 
-  // Real-Time Permanent Notification Engine
+  const scheduleNativeAlarms = async (task) => {
+    if (isMuted) return;
+
+    try {
+      const startDate = new Date(task.scheduled_time);
+      const endDate = new Date(task.expected_end_time);
+      const numId = parseInt((task.id || Date.now()).toString().slice(-6));
+
+      if (typeof window !== "undefined" && 'Capacitor' in window) {
+        const notificationsToSchedule = [];
+
+        if (startDate > new Date()) {
+          notificationsToSchedule.push({
+            title: "🚀 Task Time Started!",
+            body: `Focus block for '${task.title}' has begun. All the best!`,
+            id: numId,
+            schedule: { at: startDate },
+          });
+        }
+
+        if (endDate > new Date()) {
+          notificationsToSchedule.push({
+            title: "⏰ Time Slot Ended!",
+            body: `Time slot for '${task.title}' is over. Update your reflection!`,
+            id: numId + 1,
+            schedule: { at: endDate },
+          });
+        }
+
+        if (notificationsToSchedule.length > 0) {
+          await LocalNotifications.schedule({ notifications: notificationsToSchedule });
+        }
+      }
+    } catch (err) {
+      console.log("Native alarm scheduling error:", err);
+    }
+  };
+
   useEffect(() => {
-    if (!token || isMuted) return; // Stop triggering notifications if user muted
+    if (!token || isMuted) return;
 
     const interval = setInterval(() => {
       const now = new Date().getTime();
 
       tasks.forEach((t) => {
-        const taskId = t.notification_id || t.task_id || t.id;
-        const taskTitle = t.title || t.message || t.task_name || "Task";
         const status = (t.status || t.state || "").toLowerCase();
-
-        if (status === "completed" || status === "skipped") return;
-        if (!t.scheduled_time && !t.start_time) return;
+        if (status === "completed" || status === "skipped" || status === "rescheduled") return;
 
         const startMs = new Date(t.scheduled_time || t.start_time).getTime();
         const endMs = t.expected_end_time ? new Date(t.expected_end_time).getTime() : null;
+        const taskTitle = t.title || t.message || t.task_name || "Task";
 
-        // 1. START TIME ALERT
-        const startKey = `${taskId}-start`;
-        if (now >= startMs && now < startMs + 90000 && !notifiedTasks.has(startKey)) {
-          triggerDualNotification(
-            "🚀 Task Time Started!",
-            `Time slot for '${taskTitle}' has begun! Focus mode activated.`
-          );
-          setNotifiedTasks((prev) => new Set(prev).add(startKey));
+        if (Math.abs(now - startMs) < 15000 && !t.start_notified) {
+          playAlertSound();
+          setActiveAlert({
+            title: "🚀 Task Started!",
+            body: `Focus block for '${taskTitle}' has begun!`,
+            time: new Date().toLocaleTimeString()
+          });
+          setTasks(prev => prev.map(item => item.id === t.id ? { ...item, start_notified: true } : item));
         }
 
-        // 2. END TIME ALERT
-        const endKey = `${taskId}-end`;
-        if (endMs && now >= endMs && now < endMs + 90000 && !notifiedTasks.has(endKey)) {
-          triggerDualNotification(
-            "⏰ Expected End Time Reached!",
-            `Time slot for '${taskTitle}' is over. Please update status & reflection.`
-          );
-          setNotifiedTasks((prev) => new Set(prev).add(endKey));
+        if (endMs && Math.abs(now - endMs) < 15000 && !t.end_notified) {
+          playAlertSound();
+          setActiveAlert({
+            title: "⏰ Time Slot Ended!",
+            body: `Time slot for '${taskTitle}' is over. Please update status!`,
+            time: new Date().toLocaleTimeString()
+          });
+          setTasks(prev => prev.map(item => item.id === t.id ? { ...item, end_notified: true } : item));
         }
       });
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [tasks, token, notifiedTasks, isMuted]);
-
-  const triggerDualNotification = (title, body) => {
-    playAlertSound();
-
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification(title, { body });
-    }
-    setActiveAlert({ title, body, time: new Date().toLocaleTimeString() });
-  };
-
-  const requestNotificationPermission = () => {
-    if ("Notification" in window) {
-      Notification.requestPermission().then((permission) => {
-        setNotifPermission(permission);
-        if (permission === "granted") {
-          setIsMuted(false);
-          playAlertSound();
-          alert("Notifications enabled! You can toggle Mute anytime from top bar. 🎉");
-        }
-      });
-    }
-  };
+  }, [tasks, token, isMuted]);
 
   const toggleMute = () => {
     setIsMuted((prev) => !prev);
@@ -234,7 +231,6 @@ function App() {
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("ai_daily_tasks");
-    localStorage.removeItem("ai_notified_keys");
     localStorage.removeItem("ai_app_muted");
     setToken("");
     setTasks([]);
@@ -249,10 +245,10 @@ function App() {
       } else if (res.data && typeof res.data === 'object') {
         extractedTasks = res.data.notifications || res.data.tasks || res.data.data || [];
       }
-      
+
       setTasks(prev => {
         if (extractedTasks.length === 0) return prev;
-        
+
         const combined = [...extractedTasks];
         prev.forEach(localItem => {
           const exists = combined.some(b => (b.id || b.notification_id) === (localItem.id || localItem.notification_id));
@@ -329,7 +325,9 @@ function App() {
       message: taskName,
       scheduled_time: startIso,
       expected_end_time: endIso,
-      status: "pending"
+      status: "pending",
+      start_notified: false,
+      end_notified: false
     };
 
     try {
@@ -350,8 +348,10 @@ function App() {
         newTask.notification_id = res.data.notification_id || res.data.id;
       }
     } catch (err) {
-      console.log("Saved to persistent storage");
+      console.log("Saved locally to persistent storage");
     }
+
+    scheduleNativeAlarms(newTask);
 
     setTasks((prev) => [newTask, ...prev]);
     alert("Task Scheduled Successfully!");
@@ -395,7 +395,7 @@ function App() {
         );
       }
     } catch (err) {
-      console.log("Logged to persistent local storage");
+      console.log("Logged locally to persistent storage");
     }
 
     setTasks((prev) =>
@@ -412,7 +412,7 @@ function App() {
       })
     );
 
-    alert(`Task logged as ${responseAction.toUpperCase()}! Permanent record updated.`);
+    alert(`Task logged as ${responseAction.toUpperCase()}! Record updated.`);
     setSelectedTask(null);
     setUserReason("");
     setNewRescheduleTime("");
@@ -480,23 +480,17 @@ function App() {
       <header style={styles.header}>
         <h1 style={{ fontSize: "1.5rem" }}>⚡ AI Daily Life OS</h1>
         <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          {notifPermission !== "granted" ? (
-            <button onClick={requestNotificationPermission} style={styles.btnNotif}>
-              🔔 Enable Notifications & Sound
-            </button>
-          ) : (
-            <button
-              onClick={toggleMute}
-              style={{
-                ...styles.badgeNotifToggle,
-                backgroundColor: isMuted ? "#ef444422" : "#10b98122",
-                color: isMuted ? "#f87171" : "#34d399",
-                borderColor: isMuted ? "#ef4444" : "#10b981",
-              }}
-            >
-              {isMuted ? "🔕 Notifications Muted" : "🟢 Notifications Active"}
-            </button>
-          )}
+          <button
+            onClick={toggleMute}
+            style={{
+              ...styles.badgeNotifToggle,
+              backgroundColor: isMuted ? "#ef444422" : "#10b98122",
+              color: isMuted ? "#f87171" : "#34d399",
+              borderColor: isMuted ? "#ef4444" : "#10b981",
+            }}
+          >
+            {isMuted ? "🔕 Muted" : "🔔 Alerts Active"}
+          </button>
 
           <button
             onClick={() => setActiveTab("schedule")}
@@ -587,7 +581,7 @@ function App() {
                         {t.title || t.message || t.task_name || "Scheduled Task"}
                       </strong>
                       <p style={{ fontSize: "0.8rem", color: "#38bdf8", margin: "4px 0" }}>
-                        🕒 Start: {t.scheduled_time || t.start_time ? new Date(t.scheduled_time || t.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "N/A"} 
+                        🕒 Start: {t.scheduled_time || t.start_time ? new Date(t.scheduled_time || t.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "N/A"}
                         {t.expected_end_time && ` | End: ${new Date(t.expected_end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
                       </p>
                     </div>
@@ -652,7 +646,7 @@ function App() {
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
             <h3>Update Task: "{selectedTask.title || selectedTask.task_name || 'Task'}"</h3>
-            
+
             <label style={styles.labelModal}>Select Status:</label>
             <div style={{ display: "flex", gap: "10px", margin: "10px 0" }}>
               <button
@@ -729,7 +723,6 @@ const styles = {
   authCard: { backgroundColor: "#1e293b", padding: "30px", borderRadius: "12px", width: "100%", maxWidth: "400px", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.5)" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 30px", backgroundColor: "#1e293b", borderBottom: "1px solid #334155", flexWrap: "wrap", gap: "10px" },
   tabBtn: { color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
-  btnNotif: { backgroundColor: "#eab308", color: "#0f172a", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
   badgeNotifToggle: { border: "1px solid", padding: "6px 12px", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", cursor: "pointer" },
   btnLogout: { backgroundColor: "#ef4444", color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", cursor: "pointer" },
   main: { maxWidth: "800px", margin: "30px auto", padding: "0 20px", display: "flex", flexDirection: "column", gap: "20px" },
@@ -744,10 +737,8 @@ const styles = {
   taskList: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" },
   taskCard: { display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#0f172a", padding: "12px 16px", borderRadius: "8px", border: "1px solid #334155" },
   btnAction: { backgroundColor: "#0284c7", color: "#fff", border: "none", padding: "8px 12px", borderRadius: "6px", cursor: "pointer" },
-  
   alertBanner: { backgroundColor: "#0284c7", color: "#fff", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", fontWeight: "bold" },
   btnDismiss: { backgroundColor: "transparent", color: "#fff", border: "1px solid #fff", padding: "4px 10px", borderRadius: "4px", cursor: "pointer" },
-
   modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
   modalCard: { backgroundColor: "#1e293b", padding: "25px", borderRadius: "12px", width: "90%", maxWidth: "480px", border: "1px solid #334155" },
   labelModal: { display: "block", fontSize: "0.85rem", color: "#94a3b8", marginTop: "10px" },
