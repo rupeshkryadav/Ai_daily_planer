@@ -35,20 +35,18 @@ migrate_legacy_schema()
 # FASTAPI
 # ============================================================
 
-app = FastAPI(
-    title="AI Daily Life OS API",
-    version="1.0.0",
-    description="Backend API for AI Daily Life Operating System",
-)
+app = FastAPI()
 
-
-# ============================================================
-# CORS
-# ============================================================
+origins = [
+    "https://ai-daily-planer.vercel.app",
+    "https://ai-daily-planer-git-main-friends24.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,  # ya testing ke liye ["*"] bhi rakh sakte hain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

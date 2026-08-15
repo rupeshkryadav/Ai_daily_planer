@@ -3,7 +3,7 @@ import axios from "axios";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://ai-daily-backend-1djh.onrender.com";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const storageKey = (userId) => `ai_daily_tasks_${userId}`;
 const dateTimeLocal = (value) => {
   if (!value) return "";
