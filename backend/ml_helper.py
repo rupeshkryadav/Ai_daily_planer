@@ -1,14 +1,15 @@
-import pickle
 import os
 import numpy as np
+import joblib
 
 # ML Models path set karte hain
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "ML_models")
 
 def load_pickle(file_name):
     path = os.path.join(MODEL_DIR, file_name)
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    # These artifacts were saved with joblib, which supports the compressed
+    # model format used by scikit-learn and LightGBM.
+    return joblib.load(path)
 
 # Models and Transformers Load kar rahe hain
 try:
