@@ -21,6 +21,7 @@ import json
 
 from database import engine, Base, get_db, migrate_legacy_schema
 from models import User, Task, DynamicUserData
+from ml_helper import predict_task_insights
 
 
 # ============================================================
@@ -38,6 +39,10 @@ migrate_legacy_schema()
 app = FastAPI()
 
 origins = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+] + [
     "https://ai-daily-planer.vercel.app",
     "https://ai-daily-planer-git-main-friends24.vercel.app",
     "http://localhost:5173",
@@ -47,6 +52,9 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # ya testing ke liye ["*"] bhi rakh sakte hain
+    # Accept Vercel preview and production aliases for this project without
+    # opening credentialed API access to arbitrary websites.
+    allow_origin_regex=r"https://ai-daily-planer(?:-[a-z0-9-]+)?\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -681,7 +689,6 @@ def ai_coach(
         .order_by(DynamicUserData.recorded_at.desc())
         .first()
     )
-
     completed = [t for t in tasks if t.status == "completed"]
     skipped = [t for t in tasks if t.status == "skipped"]
     rescheduled = [t for t in tasks if t.rescheduled_time is not None]
@@ -778,6 +785,10 @@ def recommendations(
         .order_by(DynamicUserData.recorded_at.desc())
         .first()
     )
+    completed = 0
+    skipped = 0
+    rescheduled = 0
+    total_logged = 0
 
     if latest_daily_data and latest_daily_data.energy_level <= 3:
         recommendation = (
@@ -857,8 +868,49 @@ def recommendations(
                 "review your schedule at the end of the day."
             )
 
+    # Feed the local ML models with the user's latest check-in and behaviour.
+    # The model complements (rather than replaces) transparent rule-based
+    # advice, so recommendations remain useful even with little history.
+    completion_rate = completed / total_logged if total_logged else 0
+    mood_value = (latest_daily_data.mood if latest_daily_data else "Neutral") or "Neutral"
+    mood_mapping = {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}
+    energy_value = latest_daily_data.energy_level if latest_daily_data else 5
+    stress_value = latest_daily_data.stress_level if latest_daily_data else 5
+    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else 7
+    work_value = latest_daily_data.work_hours if latest_daily_data else 0
+    exercise_value = latest_daily_data.exercise_minutes if latest_daily_data else 0
+    ml_input = {
+        "sleep_hours": sleep_value,
+        "work_hours": work_value,
+        "screen_time_hours": 0,
+        "exercise_minutes": exercise_value,
+        "mood": mood_mapping.get(str(mood_value).lower(), 2),
+        "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
+        "stress_level": stress_value,
+        "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
+        "task_difficulty": 1,
+        "deadline_days_left": 1,
+    }
+    ml_insights = predict_task_insights(ml_input)
+    priority_labels = {"0": "low", "1": "medium", "2": "high"}
+    completion_labels = {"0": "needs a smaller block", "1": "is likely achievable"}
+    if "error" in ml_insights:
+        adaptive_plan = "Keep your next plan small and review it after you complete it."
+    else:
+        priority = priority_labels.get(ml_insights["predicted_priority"], "medium")
+        likelihood = completion_labels.get(ml_insights["expected_completion"], "needs a smaller block")
+        burnout_risk = ml_insights["burnout_risk"]
+        if burnout_risk >= 1 or stress_value >= 7 or sleep_value < 6:
+            adaptive_plan = "Plan one 25-minute priority block, then take a recovery break before adding another commitment."
+        elif completion_rate < 0.5 and total_logged >= 3:
+            adaptive_plan = f"Your next {priority}-priority activity {likelihood}; make it a 25-minute block at your most reliable time."
+        else:
+            adaptive_plan = f"Your next {priority}-priority activity {likelihood}; reserve a focused 45-minute block and protect it from interruptions."
+
     return {
-        "recommendation": recommendation
+        "recommendation": recommendation,
+        "adaptive_plan": adaptive_plan,
+        "model_insights": ml_insights if "error" not in ml_insights else None,
     }
 
 

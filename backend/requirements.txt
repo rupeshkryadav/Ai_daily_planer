@@ -5,6 +5,6 @@ psycopg2-binary>=2.9,<3.0
 python-dotenv>=1.0,<2.0
 email-validator>=2.0,<3.0
 numpy>=1.26,<3.0
-scikit-learn>=1.5,<2.0
+scikit-learn==1.8.0
 lightgbm>=4.0,<5.0
-python-dotenv
+joblib>=1.4,<2.0
