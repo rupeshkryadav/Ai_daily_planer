@@ -32,6 +32,8 @@ class User(Base):
     gender = Column(String(50), nullable=True)
     date_of_birth = Column(DateTime, nullable=True)
     use_case = Column(String(50), nullable=True)
+    preferred_focus_time = Column(String(30), nullable=True)
+    planning_style = Column(String(30), nullable=True)
     onboarding_complete = Column(Boolean, default=False, nullable=False)
 
     created_at = Column(

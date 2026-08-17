@@ -245,6 +245,8 @@ class ProfileUpdate(BaseModel):
     gender: Optional[str] = None
     date_of_birth: Optional[datetime] = None
     use_case: Optional[str] = None
+    preferred_focus_time: Optional[str] = None
+    planning_style: Optional[str] = None
     onboarding_complete: Optional[bool] = None
 
 
@@ -418,6 +420,8 @@ def get_me(
         "gender": current_user.gender,
         "date_of_birth": current_user.date_of_birth,
         "use_case": current_user.use_case,
+        "preferred_focus_time": current_user.preferred_focus_time,
+        "planning_style": current_user.planning_style,
         "onboarding_complete": current_user.onboarding_complete,
     }
 
@@ -447,6 +451,12 @@ def update_profile(
     if data.use_case is not None:
         current_user.use_case = data.use_case
 
+    if data.preferred_focus_time is not None:
+        current_user.preferred_focus_time = data.preferred_focus_time
+
+    if data.planning_style is not None:
+        current_user.planning_style = data.planning_style
+
     if data.onboarding_complete is not None:
         current_user.onboarding_complete = data.onboarding_complete
 
@@ -463,6 +473,8 @@ def update_profile(
             "gender": current_user.gender,
             "date_of_birth": current_user.date_of_birth,
             "use_case": current_user.use_case,
+            "preferred_focus_time": current_user.preferred_focus_time,
+            "planning_style": current_user.planning_style,
             "onboarding_complete": current_user.onboarding_complete,
         },
     }

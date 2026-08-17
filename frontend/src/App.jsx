@@ -38,6 +38,8 @@ function App() {
   const [notice, setNotice] = useState("");
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [profileForm, setProfileForm] = useState({ name: "", date_of_birth: "", gender: "", use_case: "student", study_hours: "", work_hours: "", sleep_hours: "", stress_level: "5", energy_level: "5" });
+  const [accountForm, setAccountForm] = useState({ name: "", age: "", date_of_birth: "", gender: "", use_case: "student", preferred_focus_time: "", planning_style: "" });
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const headers = { headers: { Authorization: `Bearer ${token}` } };
   const activeTasks = useMemo(() => tasks.filter((task) => !["completed", "skipped"].includes(task.status)), [tasks]);
@@ -53,6 +55,18 @@ function App() {
 
   useEffect(() => { requestNotifications(); }, []);
   useEffect(() => { localStorage.setItem("ai_app_muted", String(muted)); }, [muted]);
+  useEffect(() => {
+    if (!user) return;
+    setAccountForm({
+      name: user.name || "",
+      age: user.age ?? "",
+      date_of_birth: user.date_of_birth ? new Date(user.date_of_birth).toISOString().slice(0, 10) : "",
+      gender: user.gender || "",
+      use_case: user.use_case || "student",
+      preferred_focus_time: user.preferred_focus_time || "",
+      planning_style: user.planning_style || "",
+    });
+  }, [user]);
 
   useEffect(() => {
     if (!token) return;
@@ -210,6 +224,24 @@ function App() {
     finally { setLoading(false); }
   };
 
+  const saveProfile = async (event) => {
+    event.preventDefault();
+    setProfileSaving(true);
+    try {
+      const result = await axios.put(`${API_BASE}/users/me`, {
+        ...accountForm,
+        age: accountForm.age === "" ? null : Number(accountForm.age),
+        date_of_birth: accountForm.date_of_birth ? new Date(accountForm.date_of_birth).toISOString() : null,
+      }, headers);
+      setUser(result.data.user);
+      setNotice("Your profile has been updated.");
+    } catch (error) {
+      setNotice(error.response?.data?.detail || "Your profile could not be updated. Please try again.");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   if (!token) return (
     <main className="auth-shell">
       <section className="auth-hero"><span className="brand-mark">◈</span><p className="eyebrow">YOUR PERSONAL OPERATING SYSTEM</p><h1>Make room for what matters.</h1><p>Plan focused days, learn from your routine, and build a life that feels intentional.</p><div className="hero-points"><span>✓ Private account history</span><span>✓ Adaptive coaching</span><span>✓ Thoughtful reminders</span></div></section>
@@ -224,12 +256,12 @@ function App() {
 
   const nav = [["dashboard", "Overview", "⌂"], ["schedule", "Plan", "+"], ["history", "History", "◷"], ["settings", "Settings", "⚙"]];
   return <div className="app-shell">
-    <aside className="sidebar"><div className="brand">orbit<span>day</span></div><p className="workspace-label">PERSONAL WORKSPACE</p><nav>{nav.map(([key, label, icon]) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => setPage(key)}><span>{icon}</span>{label}</button>)}</nav><div className="sidebar-bottom"><div className="user-chip"><div>{(user?.name || user?.email || "U")[0].toUpperCase()}</div><span>{user?.name || user?.email}</span></div><button className="nav-item logout" onClick={logout}><span>↪</span>Log out</button></div></aside>
+    <aside className="sidebar"><button className="brand brand-button" onClick={() => setPage("dashboard")} aria-label="Go to dashboard">orbit<span>day</span></button><p className="workspace-label">PERSONAL WORKSPACE</p><nav>{nav.map(([key, label, icon]) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => setPage(key)}><span>{icon}</span>{label}</button>)}</nav><div className="sidebar-bottom"><button className="user-chip" onClick={() => setPage("settings")} title="Open profile"><div>{(user?.name || user?.email || "U")[0].toUpperCase()}</div><span>{user?.name || user?.email}</span></button><button className="nav-item logout" onClick={logout}><span>↪</span>Log out</button></div></aside>
     <main className="workspace"><header className="topbar"><div><p className="eyebrow">{page === "dashboard" ? "GOOD TO SEE YOU" : "YOUR PERSONAL SPACE"}</p><h1>{page === "dashboard" ? `Hello${user?.name ? `, ${user.name}` : ""}.` : page[0].toUpperCase() + page.slice(1)}</h1></div><button className="notification-toggle" onClick={() => setMuted(!muted)}>{muted ? "Notifications off" : "Notifications on"}</button></header>{notice && <div className="notice success app-notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       {page === "dashboard" && <><section className="stats-grid"><article><span>ACTIVE PLANS</span><strong>{activeTasks.length}</strong><small>Ready for your attention</small></article><article><span>COMPLETED</span><strong>{completedCount}</strong><small>Tasks in your history</small></article><article><span>FOLLOW-THROUGH</span><strong>{completionRate}%</strong><small>Of logged tasks</small></article></section><section className="content-grid"><article className="panel wide"><div className="panel-heading"><div><p className="eyebrow">NEXT UP</p><h2>Your schedule</h2></div><button className="secondary-button" onClick={() => setPage("schedule")}>Plan a task</button></div>{activeTasks.length ? <div className="task-stack">{activeTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} onClick={() => openTask(task)} />)}</div> : <EmptyState title="A clear day starts with one plan." action="Schedule your first task" onClick={() => setPage("schedule")} />}</article><article className="panel coach-card"><p className="eyebrow">ADAPTIVE COACH</p><h2>Built around your history</h2><p>{coach}</p><hr /><p className="insight"><b>Suggested next step</b>{insight}</p></article></section></>}
       {page === "schedule" && <section className="plan-layout"><article className="panel schedule-card"><p className="eyebrow">ADD TO YOUR DAY</p><h2>Schedule a focused block</h2><form className="task-form" onSubmit={createTask}><label>What do you want to do?<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Finish portfolio case study" required /></label><div className="two-column"><label>Start<input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} required /></label><label>End<input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} required /></label></div><label>Priority<select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}><option value="high">High — do this first if plans overlap</option><option value="medium">Medium — normal priority</option><option value="low">Low — flexible</option></select></label><button className="primary-button">Schedule task</button></form></article><article className="panel"><p className="eyebrow">START FASTER</p><h2>Routine templates</h2><div className="preset-list">{[["Morning workout", 45], ["Deep work session", 90], ["Read and learn", 30], ["Daily reflection", 20]].map(([title, minutes]) => <button key={title} onClick={() => applyPreset(title, minutes)}><span>{title}</span><small>{minutes} min</small></button>)}</div></article></section>}
       {page === "history" && <section className="panel"><div className="panel-heading"><div><p className="eyebrow">SAVED TO YOUR ACCOUNT</p><h2>Activity history</h2></div><span className="count-pill">{historyTasks.length} records</span></div>{historyTasks.length ? <div className="history-table">{historyTasks.map((task) => <div key={task.id} className="history-row"><div><b>{task.title}</b><small>{displayDate(task.scheduled_time)}</small>{task.user_reason && <em>“{task.user_reason}”</em>}</div><span className={`status ${task.status}`}>{task.status}</span></div>)}</div> : <EmptyState title="Completed plans will live here." action="View your schedule" onClick={() => setPage("dashboard")} />}</section>}
-      {page === "settings" && <section className="settings-grid"><article className="panel"><p className="eyebrow">PROFILE</p><h2>Your details</h2><div className="settings-line"><span>Name</span><b>{user?.name || "Not provided"}</b></div><div className="settings-line"><span>Email address</span><b>{user?.email}</b></div><div className="settings-line"><span>Date of birth</span><b>{user?.date_of_birth ? new Date(user.date_of_birth).toLocaleDateString() : "Not provided"}</b></div><div className="settings-line"><span>Gender</span><b>{user?.gender || "Not provided"}</b></div><div className="settings-line"><span>Primary focus</span><b>{user?.use_case || "Not provided"}</b></div><p className="muted-copy">These are the details you shared during onboarding and are stored securely with your account.</p></article><article className="panel"><p className="eyebrow">NOTIFICATIONS</p><h2>Stay in control</h2><div className="settings-line"><span>Task reminders</span><button className={muted ? "toggle" : "toggle on"} onClick={() => setMuted(!muted)}><i /></button></div><p className="muted-copy">Turn reminders on to receive start and end alerts for scheduled tasks.</p></article></section>}
+      {page === "settings" && <section className="settings-grid"><article className="panel"><p className="eyebrow">PROFILE</p><h2>About you</h2><p className="muted-copy">Keep these details current so your plans can stay personal.</p><form className="profile-form" onSubmit={saveProfile}><label>Name<input value={accountForm.name} onChange={(e) => setAccountForm({ ...accountForm, name: e.target.value })} required /></label><label>Email address<input value={user?.email || ""} disabled /></label><div className="two-column"><label>Age<input type="number" min="1" max="120" value={accountForm.age} onChange={(e) => setAccountForm({ ...accountForm, age: e.target.value })} /></label><label>Date of birth<input type="date" value={accountForm.date_of_birth} onChange={(e) => setAccountForm({ ...accountForm, date_of_birth: e.target.value })} /></label></div><div className="two-column"><label>Gender<select value={accountForm.gender} onChange={(e) => setAccountForm({ ...accountForm, gender: e.target.value })}><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="non-binary">Non-binary</option><option value="other">Other</option></select></label><label>Primary focus<select value={accountForm.use_case} onChange={(e) => setAccountForm({ ...accountForm, use_case: e.target.value })}><option value="student">Studying</option><option value="professional">Professional work</option><option value="personal">Personal goals</option></select></label></div><p className="eyebrow profile-question">HELP US KNOW YOU BETTER</p><div className="two-column"><label>When do you focus best?<select value={accountForm.preferred_focus_time} onChange={(e) => setAccountForm({ ...accountForm, preferred_focus_time: e.target.value })}><option value="">Choose a time</option><option value="morning">Morning</option><option value="afternoon">Afternoon</option><option value="evening">Evening</option><option value="varies">It varies</option></select></label><label>How do you like to plan?<select value={accountForm.planning_style} onChange={(e) => setAccountForm({ ...accountForm, planning_style: e.target.value })}><option value="">Choose a style</option><option value="structured">Structured schedule</option><option value="flexible">Flexible task list</option><option value="mixed">A mix of both</option></select></label></div><button className="primary-button" disabled={profileSaving}>{profileSaving ? "Saving…" : "Save profile"}</button></form></article><article className="panel"><p className="eyebrow">NOTIFICATIONS</p><h2>Stay in control</h2><div className="settings-line"><span>Task reminders</span><button className={muted ? "toggle" : "toggle on"} onClick={() => setMuted(!muted)}><i /></button></div><p className="muted-copy">Turn reminders on to receive start and end alerts for scheduled tasks.</p></article></section>}
     </main>
     {selectedTask && <div className="modal-backdrop" onMouseDown={() => setSelectedTask(null)}><section className="modal" onMouseDown={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setSelectedTask(null)}>×</button><p className="eyebrow">UPDATE TASK</p><h2>{selectedTask.title}</h2><p className="task-date">Scheduled: {displayDate(selectedTask.scheduled_time)}</p><div className="response-options">{[["completed", "Completed"], ["rescheduled", "Reschedule"], ["skipped", "Skip"]].map(([key, label]) => <button key={key} className={response === key ? "selected" : ""} onClick={() => setResponse(key)}>{label}</button>)}</div>{response === "rescheduled" && <label>New start time<input type="datetime-local" value={rescheduleTime} onChange={(e) => setRescheduleTime(e.target.value)} required /><small>The original task duration will be retained automatically.</small></label>}<label>Reflection (optional)<textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What helped or got in the way?" /></label><button className="primary-button" onClick={updateTask}>{response === "rescheduled" ? "Reschedule task" : "Save update"}</button></section></div>}
   </div>;

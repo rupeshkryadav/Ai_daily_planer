@@ -27,3 +27,11 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .priority.high { color: #8c3934; background: #f9e5e2; }
 .priority.medium { color: #80631d; background: #f7f0d5; }
 .priority.low { color: #356543; background: #e2f1e1; }
+.brand-button { border: 0; background: transparent; padding: 0; text-align: left; width: fit-content; }
+.brand-button:hover { opacity: .82; }
+.user-chip { width: 100%; border: 0; background: transparent; color: inherit; text-align: left; }
+.user-chip:hover { background: #2b2a41; border-radius: 8px; }
+.profile-form { display: grid; gap: 16px; margin-top: 20px; }
+.profile-form label { display: grid; gap: 7px; color: #535064; font-size: 12px; font-weight: 700; }
+.profile-form input:disabled { color: #858294; background: #f3f3ef; cursor: not-allowed; }
+.profile-question { margin: 8px 0 -2px; }

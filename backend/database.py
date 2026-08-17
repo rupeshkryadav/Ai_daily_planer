@@ -38,6 +38,8 @@ def migrate_legacy_schema():
             "gender": "VARCHAR(50)",
             "date_of_birth": "TIMESTAMP",
             "use_case": "VARCHAR(50)",
+            "preferred_focus_time": "VARCHAR(30)",
+            "planning_style": "VARCHAR(30)",
             "onboarding_complete": "BOOLEAN DEFAULT FALSE",
         },
         "tasks": {
