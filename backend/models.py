@@ -70,6 +70,11 @@ class Task(Base):
         default="pending",
         nullable=False
     )
+    priority = Column(
+        String(10),
+        default="medium",
+        nullable=False
+    )
 
     user_reason = Column(Text, nullable=True)
     next_action = Column(Text, nullable=True)

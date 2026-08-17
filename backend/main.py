@@ -12,7 +12,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, case
 import hashlib
 import hmac
 import secrets
@@ -477,9 +477,14 @@ def create_task(
     title: str,
     scheduled_time: datetime,
     expected_end_time: Optional[datetime] = None,
+    priority: str = "medium",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    priority = priority.lower().strip()
+    if priority not in {"low", "medium", "high"}:
+        raise HTTPException(status_code=400, detail="Priority must be low, medium, or high")
+
     task = Task(
         user_id=current_user.id,
         title=title,
@@ -487,6 +492,7 @@ def create_task(
         scheduled_time=scheduled_time,
         expected_end_time=expected_end_time,
         status="pending",
+        priority=priority,
     )
 
     db.add(task)
@@ -502,6 +508,7 @@ def create_task(
         "scheduled_time": task.scheduled_time,
         "expected_end_time": task.expected_end_time,
         "status": task.status,
+        "priority": task.priority,
         "start_notified": task.start_notified,
         "end_notified": task.end_notified,
     }
@@ -519,7 +526,14 @@ def get_tasks(
     tasks = (
         db.query(Task)
         .filter(Task.user_id == current_user.id)
-        .order_by(Task.scheduled_time.desc())
+        .order_by(
+            Task.scheduled_time.desc(),
+            case(
+                (Task.priority == "high", 3),
+                (Task.priority == "medium", 2),
+                else_=1,
+            ).desc(),
+        )
         .all()
     )
 
@@ -533,6 +547,7 @@ def get_tasks(
             "scheduled_time": task.scheduled_time,
             "expected_end_time": task.expected_end_time,
             "status": task.status,
+            "priority": task.priority,
             "user_reason": task.user_reason,
             "rescheduled_time": task.rescheduled_time,
             "start_notified": task.start_notified,
@@ -928,6 +943,7 @@ def task_to_dict(task: Task):
         "scheduled_time": task.scheduled_time,
         "expected_end_time": task.expected_end_time,
         "status": task.status,
+        "priority": task.priority,
         "user_reason": task.user_reason,
         "rescheduled_time": task.rescheduled_time,
         "start_notified": task.start_notified,

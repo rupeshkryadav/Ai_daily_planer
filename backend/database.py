@@ -42,6 +42,7 @@ def migrate_legacy_schema():
         },
         "tasks": {
             "message": "TEXT",
+            "priority": "VARCHAR(10) DEFAULT 'medium' NOT NULL",
             "rescheduled_time": "TIMESTAMP",
             "start_notified": "BOOLEAN DEFAULT FALSE",
             "end_notified": "BOOLEAN DEFAULT FALSE",
