@@ -40,6 +40,8 @@ def migrate_legacy_schema():
             "use_case": "VARCHAR(50)",
             "preferred_focus_time": "VARCHAR(30)",
             "planning_style": "VARCHAR(30)",
+            "daily_screen_time": "FLOAT",
+            "preferred_task_difficulty": "VARCHAR(20)",
             "onboarding_complete": "BOOLEAN DEFAULT FALSE",
         },
         "tasks": {

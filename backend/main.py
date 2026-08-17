@@ -247,6 +247,8 @@ class ProfileUpdate(BaseModel):
     use_case: Optional[str] = None
     preferred_focus_time: Optional[str] = None
     planning_style: Optional[str] = None
+    daily_screen_time: Optional[float] = None
+    preferred_task_difficulty: Optional[str] = None
     onboarding_complete: Optional[bool] = None
 
 
@@ -422,6 +424,8 @@ def get_me(
         "use_case": current_user.use_case,
         "preferred_focus_time": current_user.preferred_focus_time,
         "planning_style": current_user.planning_style,
+        "daily_screen_time": current_user.daily_screen_time,
+        "preferred_task_difficulty": current_user.preferred_task_difficulty,
         "onboarding_complete": current_user.onboarding_complete,
     }
 
@@ -457,6 +461,12 @@ def update_profile(
     if data.planning_style is not None:
         current_user.planning_style = data.planning_style
 
+    if data.daily_screen_time is not None:
+        current_user.daily_screen_time = data.daily_screen_time
+
+    if data.preferred_task_difficulty is not None:
+        current_user.preferred_task_difficulty = data.preferred_task_difficulty
+
     if data.onboarding_complete is not None:
         current_user.onboarding_complete = data.onboarding_complete
 
@@ -475,6 +485,8 @@ def update_profile(
             "use_case": current_user.use_case,
             "preferred_focus_time": current_user.preferred_focus_time,
             "planning_style": current_user.planning_style,
+            "daily_screen_time": current_user.daily_screen_time,
+            "preferred_task_difficulty": current_user.preferred_task_difficulty,
             "onboarding_complete": current_user.onboarding_complete,
         },
     }
@@ -909,13 +921,16 @@ def recommendations(
     ml_input = {
         "sleep_hours": sleep_value,
         "work_hours": work_value,
-        "screen_time_hours": 0,
+        "screen_time_hours": current_user.daily_screen_time or 0,
         "exercise_minutes": exercise_value,
         "mood": mood_mapping.get(str(mood_value).lower(), 2),
         "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
         "stress_level": stress_value,
         "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
-        "task_difficulty": 1,
+        "task_difficulty": {"easy": 0, "medium": 1, "hard": 2}.get(
+            (current_user.preferred_task_difficulty or "medium").lower(),
+            1,
+        ),
         "deadline_days_left": 1,
     }
     ml_insights = predict_task_insights(ml_input)
