@@ -6,7 +6,7 @@ import "./App.css";
 // VITE_API_BASE is set for custom/staging deployments. The public Render API
 // is deliberately the fallback so a Vercel build never tries to call the
 // visitor's own computer (localhost) in production.
-const API_BASE = (import.meta.env.VITE_API_BASE || "https://ai-daily-backend-1djh.onrender.com").replace(/\/$/, "");
+const API_BASE = (import.meta.env.VITE_API_BASE || "https://ai-daily-backend-ldjh.onrender.com").replace(/\/$/, "");
 const storageKey = (userId) => `ai_daily_tasks_${userId}`;
 const dateTimeLocal = (value) => {
   if (!value) return "";
