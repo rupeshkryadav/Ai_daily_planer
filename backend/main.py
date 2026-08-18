@@ -19,7 +19,7 @@ import secrets
 import base64
 import json
 
-from database import engine, Base, get_db, migrate_legacy_schema
+from database import engine, Base, get_db, migrate_legacy_schema, SessionLocal
 from models import User, Task, DynamicUserData
 from ml_helper import predict_task_insights
 
@@ -106,8 +106,29 @@ def verify_password(password: str, stored_password: str) -> bool:
 
 
 def verify_legacy_password(password: str, stored_password: Optional[str]) -> bool:
-    """Allow pre-migration accounts to log in once and upgrade securely."""
+    """Supports legacy records only until the startup migration clears them."""
     return bool(stored_password) and hmac.compare_digest(password, stored_password)
+
+
+def migrate_legacy_passwords() -> None:
+    """Hash and remove historic plain-text passwords exactly once."""
+    db = SessionLocal()
+    try:
+        legacy_users = db.query(User).filter(User.hashed_password.isnot(None)).all()
+        changed = False
+        for user in legacy_users:
+            if not user.password_hash:
+                user.password_hash = hash_password(user.hashed_password)
+            # Never retain the legacy plain-text value after a hash exists.
+            user.hashed_password = None
+            changed = True
+        if changed:
+            db.commit()
+    finally:
+        db.close()
+
+
+migrate_legacy_passwords()
 
 
 # ============================================================
@@ -237,6 +258,11 @@ class LoginRequest(BaseModel):
     email: Optional[str] = None
     username: Optional[str] = None
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class ProfileUpdate(BaseModel):
@@ -389,8 +415,12 @@ def login(
             detail="Invalid email or password",
         )
 
+    needs_password_upgrade = not user.password_hash or bool(user.hashed_password)
     if not user.password_hash:
         user.password_hash = hash_password(final_password)
+    if user.hashed_password:
+        user.hashed_password = None
+    if needs_password_upgrade:
         db.commit()
 
     token = create_token(user.id)
@@ -954,6 +984,42 @@ def recommendations(
         "adaptive_plan": adaptive_plan,
         "model_insights": ml_insights if "error" not in ml_insights else None,
     }
+
+
+# ============================================================
+# CHANGE PASSWORD
+# ============================================================
+
+@app.put("/users/me/password")
+def change_password(
+    data: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if len(data.new_password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must contain at least 8 characters",
+        )
+
+    current_password_is_valid = (
+        verify_password(data.current_password, current_user.password_hash or "")
+        or verify_legacy_password(data.current_password, current_user.hashed_password)
+    )
+    if not current_password_is_valid:
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if hmac.compare_digest(data.current_password, data.new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from the current password",
+        )
+
+    current_user.password_hash = hash_password(data.new_password)
+    current_user.hashed_password = None
+    db.commit()
+
+    return {"message": "Password changed successfully"}
 
 
 # ============================================================
