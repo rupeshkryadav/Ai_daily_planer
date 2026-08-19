@@ -62,6 +62,8 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .routine-help > p:not(.eyebrow) { color: #4d5e48; line-height: 1.65; font-size: 14px; }
 .routine-help .muted-copy { color: #64735f; }
 .coach-link { margin-top: 18px; }
+.ai-status, .ai-progress { color: #5c7552; font-size: 11px; line-height: 1.5; margin: 13px 0 0; }
+.ai-progress { padding-top: 12px; border-top: 1px solid #efeee9; }
 .coach-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, .85fr); gap: 18px; }
 .coach-conversation { display: grid; gap: 15px; }
 .coach-conversation > .muted-copy { margin-top: -8px; }

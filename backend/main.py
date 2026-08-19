@@ -1138,10 +1138,35 @@ def hour_label(hour: int) -> str:
     return datetime(2000, 1, 1, hour).strftime("%I %p").lstrip("0")
 
 
+REAL_TASK_HISTORY_THRESHOLD = 7
+REAL_ROUTINE_DAYS_THRESHOLD = 5
+
+
+def bootstrap_profile(current_user: User) -> dict:
+    """Synthetic prior for a new user; it is never written as user history."""
+    focus_hour = {
+        "morning": 9, "afternoon": 14, "evening": 19,
+    }.get(current_user.preferred_focus_time or "")
+    if focus_hour is None:
+        focus_hour = {"student": 10, "professional": 9, "personal": 11}.get(
+            current_user.use_case or "", 10
+        )
+    return {
+        "focus_hour": focus_hour,
+        "sleep_hours": 7.5,
+        "work_hours": 8 if current_user.use_case == "professional" else 4 if current_user.use_case == "student" else 2,
+        "exercise_minutes": 30,
+        "energy": 6,
+        "stress": 4,
+        "block_minutes": 60 if current_user.planning_style == "structured" else 45,
+    }
+
+
 def build_second_mind_context(current_user: User, db: Session) -> dict:
-    """Combine saved ML artifacts with the user's own routine and outcomes."""
+    """Blend a temporary synthetic prior into real user signals until sufficient history exists."""
     tasks = db.query(Task).filter(Task.user_id == current_user.id).all()
     completed = [task for task in tasks if task.status == "completed"]
+    prior = bootstrap_profile(current_user)
     latest_daily_data = (
         db.query(DynamicUserData)
         .filter(DynamicUserData.user_id == current_user.id)
@@ -1162,16 +1187,36 @@ def build_second_mind_context(current_user: User, db: Session) -> dict:
         .all()
     )
     wake_hour = round(sum(entry.occurred_at.hour for entry in routine_entries) / len(routine_entries)) if routine_entries else None
+    routine_days = len({entry.occurred_at.date() for entry in routine_entries})
+
+    task_confidence = min(len(completed) / REAL_TASK_HISTORY_THRESHOLD, 1)
+    routine_confidence = min(routine_days / REAL_ROUTINE_DAYS_THRESHOLD, 1)
+    timing_confidence = max(task_confidence, routine_confidence)
+    real_focus_hour = learned_hour if task_confidence >= routine_confidence else (wake_hour + 1 if wake_hour is not None else None)
+    suggested_hour = (
+        round((prior["focus_hour"] * (1 - timing_confidence)) + (real_focus_hour * timing_confidence))
+        if real_focus_hour is not None else prior["focus_hour"]
+    )
+    suggested_hour = max(0, min(23, suggested_hour))
+    if timing_confidence >= 1:
+        data_mode = "personalized"
+        data_source = "Based on your own completed tasks and routine history."
+    elif timing_confidence > 0:
+        data_mode = "blended"
+        data_source = "Blending your saved routine with a temporary starter profile while Orbit learns your pattern."
+    else:
+        data_mode = "bootstrap"
+        data_source = "Using a temporary starter profile based on your onboarding preferences; no synthetic events are saved to your history."
 
     mood_value = (latest_daily_data.mood if latest_daily_data else "Neutral") or "Neutral"
-    energy_value = latest_daily_data.energy_level if latest_daily_data else 5
-    stress_value = latest_daily_data.stress_level if latest_daily_data else 5
-    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else 7
+    energy_value = latest_daily_data.energy_level if latest_daily_data else prior["energy"]
+    stress_value = latest_daily_data.stress_level if latest_daily_data else prior["stress"]
+    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else prior["sleep_hours"]
     ml_input = {
         "sleep_hours": sleep_value,
-        "work_hours": latest_daily_data.work_hours if latest_daily_data else 0,
+        "work_hours": latest_daily_data.work_hours if latest_daily_data else prior["work_hours"],
         "screen_time_hours": current_user.daily_screen_time or 0,
-        "exercise_minutes": latest_daily_data.exercise_minutes if latest_daily_data else 0,
+        "exercise_minutes": latest_daily_data.exercise_minutes if latest_daily_data else prior["exercise_minutes"],
         "mood": {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}.get(str(mood_value).lower(), 2),
         "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
         "stress_level": stress_value,
@@ -1185,6 +1230,11 @@ def build_second_mind_context(current_user: User, db: Session) -> dict:
         "learned_hour": learned_hour,
         "learned_hour_samples": completed_by_hour.get(learned_hour, 0) if learned_hour is not None else 0,
         "wake_hour": wake_hour,
+        "suggested_hour": suggested_hour,
+        "data_mode": data_mode,
+        "data_source": data_source,
+        "history_progress": {"completed_tasks": len(completed), "routine_days": routine_days, "needed_completed_tasks": REAL_TASK_HISTORY_THRESHOLD, "needed_routine_days": REAL_ROUTINE_DAYS_THRESHOLD},
+        "starter_block_minutes": prior["block_minutes"],
         "energy": energy_value,
         "stress": stress_value,
         "sleep": sleep_value,
@@ -1195,15 +1245,8 @@ def second_mind_response(context: dict, request: str = "") -> dict:
     model = context["model"]
     priority = {"0": "low", "1": "medium", "2": "high"}.get(str(model.get("predicted_priority")), "medium")
     can_complete = str(model.get("expected_completion")) == "1"
-    learned_hour = context["learned_hour"]
-    if learned_hour is None:
-        learned_hour = context["wake_hour"] + 1 if context["wake_hour"] is not None else 10
-    suggested_time = hour_label(learned_hour)
-    rationale = (
-        f"This is based on {context['learned_hour_samples']} completed task(s) at that time."
-        if context["learned_hour_samples"] >= 2
-        else "This is a starting suggestion until more completed-task history is available."
-    )
+    suggested_time = hour_label(context["suggested_hour"])
+    rationale = context["data_source"]
 
     text = request.lower()
     recovery_needed = context["sleep"] < 6 or context["stress"] >= 7 or context["energy"] <= 3
@@ -1214,7 +1257,7 @@ def second_mind_response(context: dict, request: str = "") -> dict:
         )
         suggested_time = "after a 20-minute break"
     elif any(word in text for word in ("when", "schedule", "time", "plan", "task", "study", "work")):
-        block = "25 minutes" if not can_complete else "45 minutes"
+        block = "25 minutes" if not can_complete else f"{context['starter_block_minutes']} minutes"
         answer = f"Schedule your next {priority}-priority focus block at {suggested_time} for {block}. {rationale}"
     else:
         answer = (
@@ -1227,6 +1270,8 @@ def second_mind_response(context: dict, request: str = "") -> dict:
         "priority": priority,
         "completion_likely": can_complete,
         "reason": rationale,
+        "data_mode": context["data_mode"],
+        "history_progress": context["history_progress"],
         "model_insights": model if "error" not in model else None,
     }
 
