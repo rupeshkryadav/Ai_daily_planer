@@ -50,5 +50,17 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .routine-help { align-self: start; background: #eef3e9; border-color: #d9e5d0; }
 .routine-help > p:not(.eyebrow) { color: #4d5e48; line-height: 1.65; font-size: 14px; }
 .routine-help .muted-copy { color: #64735f; }
+.coach-link { margin-top: 18px; }
+.coach-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, .85fr); gap: 18px; }
+.coach-conversation { display: grid; gap: 15px; }
+.coach-conversation > .muted-copy { margin-top: -8px; }
+.message-stack { display: grid; gap: 10px; min-height: 260px; max-height: 450px; overflow-y: auto; padding: 4px 2px; }
+.coach-message { max-width: 82%; padding: 12px 14px; border-radius: 12px; line-height: 1.5; font-size: 14px; }
+.coach-message.assistant { background: #e8eedf; color: #40533b; border-top-left-radius: 3px; }
+.coach-message.user { justify-self: end; background: #303046; color: #fff; border-top-right-radius: 3px; }
+.coach-form { display: grid; grid-template-columns: 1fr auto; gap: 9px; border-top: 1px solid #efeee9; padding-top: 16px; }
+.coach-form .primary-button { width: auto; padding-inline: 18px; }
+.coach-facts { align-self: start; }
+@media (max-width: 850px) { .coach-layout { grid-template-columns: 1fr; } }
 @media (max-width: 850px) { .routine-layout { grid-template-columns: 1fr; } }
-@media (max-width: 520px) { .routine-grid { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .routine-grid { grid-template-columns: 1fr; } .coach-form { grid-template-columns: 1fr; } .coach-form .primary-button { width: 100%; } }

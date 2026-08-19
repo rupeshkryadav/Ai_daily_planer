@@ -298,6 +298,10 @@ class TimeEntriesRequest(BaseModel):
     entries: list[TimeEntryInput]
 
 
+class CoachMessageRequest(BaseModel):
+    message: str
+
+
 # ============================================================
 # ROOT
 # ============================================================
@@ -922,6 +926,124 @@ def ai_coach(
 # ============================================================
 # ADAPTIVE RECOMMENDATIONS
 # ============================================================
+
+def hour_label(hour: int) -> str:
+    return datetime(2000, 1, 1, hour).strftime("%I %p").lstrip("0")
+
+
+def build_second_mind_context(current_user: User, db: Session) -> dict:
+    """Combine saved ML artifacts with the user's own routine and outcomes."""
+    tasks = db.query(Task).filter(Task.user_id == current_user.id).all()
+    completed = [task for task in tasks if task.status == "completed"]
+    latest_daily_data = (
+        db.query(DynamicUserData)
+        .filter(DynamicUserData.user_id == current_user.id)
+        .order_by(DynamicUserData.recorded_at.desc())
+        .first()
+    )
+    completed_by_hour = {}
+    for task in completed:
+        hour = task.scheduled_time.hour
+        completed_by_hour[hour] = completed_by_hour.get(hour, 0) + 1
+    learned_hour = max(completed_by_hour, key=completed_by_hour.get, default=None)
+
+    routine_entries = (
+        db.query(TimeEntry)
+        .filter(TimeEntry.user_id == current_user.id, TimeEntry.activity == "wake_up")
+        .order_by(TimeEntry.occurred_at.desc())
+        .limit(30)
+        .all()
+    )
+    wake_hour = round(sum(entry.occurred_at.hour for entry in routine_entries) / len(routine_entries)) if routine_entries else None
+
+    mood_value = (latest_daily_data.mood if latest_daily_data else "Neutral") or "Neutral"
+    energy_value = latest_daily_data.energy_level if latest_daily_data else 5
+    stress_value = latest_daily_data.stress_level if latest_daily_data else 5
+    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else 7
+    ml_input = {
+        "sleep_hours": sleep_value,
+        "work_hours": latest_daily_data.work_hours if latest_daily_data else 0,
+        "screen_time_hours": current_user.daily_screen_time or 0,
+        "exercise_minutes": latest_daily_data.exercise_minutes if latest_daily_data else 0,
+        "mood": {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}.get(str(mood_value).lower(), 2),
+        "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
+        "stress_level": stress_value,
+        "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
+        "task_difficulty": {"easy": 0, "medium": 1, "hard": 2}.get((current_user.preferred_task_difficulty or "medium").lower(), 1),
+        "deadline_days_left": 1,
+    }
+    return {
+        "model": predict_task_insights(ml_input),
+        "completed_count": len(completed),
+        "learned_hour": learned_hour,
+        "learned_hour_samples": completed_by_hour.get(learned_hour, 0) if learned_hour is not None else 0,
+        "wake_hour": wake_hour,
+        "energy": energy_value,
+        "stress": stress_value,
+        "sleep": sleep_value,
+    }
+
+
+def second_mind_response(context: dict, request: str = "") -> dict:
+    model = context["model"]
+    priority = {"0": "low", "1": "medium", "2": "high"}.get(str(model.get("predicted_priority")), "medium")
+    can_complete = str(model.get("expected_completion")) == "1"
+    learned_hour = context["learned_hour"]
+    if learned_hour is None:
+        learned_hour = context["wake_hour"] + 1 if context["wake_hour"] is not None else 10
+    suggested_time = hour_label(learned_hour)
+    rationale = (
+        f"This is based on {context['learned_hour_samples']} completed task(s) at that time."
+        if context["learned_hour_samples"] >= 2
+        else "This is a starting suggestion until more completed-task history is available."
+    )
+
+    text = request.lower()
+    recovery_needed = context["sleep"] < 6 or context["stress"] >= 7 or context["energy"] <= 3
+    if any(word in text for word in ("rest", "break", "tired", "burnout", "sleep")) or recovery_needed:
+        answer = (
+            "Your current signals point to recovery first: take a 20-minute screen-free break, then choose one small task. "
+            "Avoid scheduling demanding work until your energy is steadier."
+        )
+        suggested_time = "after a 20-minute break"
+    elif any(word in text for word in ("when", "schedule", "time", "plan", "task", "study", "work")):
+        block = "25 minutes" if not can_complete else "45 minutes"
+        answer = f"Schedule your next {priority}-priority focus block at {suggested_time} for {block}. {rationale}"
+    else:
+        answer = (
+            f"Right now I would protect {suggested_time} for your most important work and keep everything else lighter. "
+            f"Your model assessment suggests a {priority}-priority next step. {rationale}"
+        )
+    return {
+        "answer": answer,
+        "suggested_time": suggested_time,
+        "priority": priority,
+        "completion_likely": can_complete,
+        "reason": rationale,
+        "model_insights": model if "error" not in model else None,
+    }
+
+
+@app.get("/users/me/second-mind")
+def second_mind(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return second_mind_response(build_second_mind_context(current_user, db))
+
+
+@app.post("/users/me/coach/messages")
+def coach_message(
+    data: CoachMessageRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message = data.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Ask Orbit a question first")
+    if len(message) > 500:
+        raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
+    return second_mind_response(build_second_mind_context(current_user, db), message)
 
 @app.get("/users/me/recommendations")
 def recommendations(
