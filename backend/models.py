@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Boolean,
     Float,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -74,6 +75,11 @@ class Task(Base):
         default="pending",
         nullable=False
     )
+    time_entries = relationship(
+        "TimeEntry",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
     priority = Column(
         String(10),
         default="medium",
@@ -134,3 +140,24 @@ class DynamicUserData(Base):
         default=datetime.utcnow,
         nullable=False
     )
+
+
+class TimeEntry(Base):
+    """A small, real-world routine signal used for future schedule training."""
+    __tablename__ = "time_entries"
+    __table_args__ = (
+        UniqueConstraint("user_id", "activity", "occurred_at", name="uq_time_entry"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    activity = Column(String(50), nullable=False)
+    occurred_at = Column(DateTime, nullable=False, index=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="time_entries")

@@ -20,7 +20,7 @@ import base64
 import json
 
 from database import engine, Base, get_db, migrate_legacy_schema, SessionLocal
-from models import User, Task, DynamicUserData
+from models import User, Task, DynamicUserData, TimeEntry
 from ml_helper import predict_task_insights
 
 
@@ -287,6 +287,15 @@ class DynamicDataRequest(BaseModel):
     mood: Optional[str] = None
     energy_level: float = 0
     stress_level: float = 0
+
+
+class TimeEntryInput(BaseModel):
+    activity: str
+    occurred_at: datetime
+
+
+class TimeEntriesRequest(BaseModel):
+    entries: list[TimeEntryInput]
 
 
 # ============================================================
@@ -738,6 +747,82 @@ def save_dynamic_data(
         "message": "Dynamic user data saved",
         "id": record.id,
     }
+
+
+# ============================================================
+# DAILY ROUTINE TIME DATA
+# ============================================================
+
+ROUTINE_ACTIVITIES = {
+    "wake_up", "breakfast", "lunch", "exercise", "dinner", "wind_down", "sleep",
+}
+
+
+def time_entry_to_dict(entry: TimeEntry):
+    return {
+        "id": entry.id,
+        "activity": entry.activity,
+        "occurred_at": entry.occurred_at,
+        "recorded_at": entry.recorded_at,
+    }
+
+
+@app.get("/users/me/time-entries")
+def get_time_entries(
+    date: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id)
+    if date:
+        try:
+            selected_day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must use YYYY-MM-DD format")
+        query = query.filter(
+            TimeEntry.occurred_at >= datetime.combine(selected_day, datetime.min.time()),
+            TimeEntry.occurred_at < datetime.combine(selected_day + timedelta(days=1), datetime.min.time()),
+        )
+    entries = query.order_by(TimeEntry.occurred_at.asc()).limit(100).all()
+    return [time_entry_to_dict(entry) for entry in entries]
+
+
+@app.post("/users/me/time-entries")
+def save_time_entries(
+    data: TimeEntriesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not data.entries:
+        raise HTTPException(status_code=400, detail="Add at least one activity time")
+    if len(data.entries) > len(ROUTINE_ACTIVITIES):
+        raise HTTPException(status_code=400, detail="Too many activity entries")
+
+    saved = []
+    seen = set()
+    for input_entry in data.entries:
+        activity = input_entry.activity.strip().lower()
+        if activity not in ROUTINE_ACTIVITIES:
+            raise HTTPException(status_code=400, detail=f"Unsupported routine activity: {activity}")
+        if activity in seen:
+            raise HTTPException(status_code=400, detail="Each activity can be entered once per save")
+        seen.add(activity)
+
+        occurred_at = input_entry.occurred_at.replace(tzinfo=None)
+        entry = db.query(TimeEntry).filter(
+            TimeEntry.user_id == current_user.id,
+            TimeEntry.activity == activity,
+            TimeEntry.occurred_at == occurred_at,
+        ).first()
+        if not entry:
+            entry = TimeEntry(user_id=current_user.id, activity=activity, occurred_at=occurred_at)
+            db.add(entry)
+        saved.append(entry)
+
+    db.commit()
+    for entry in saved:
+        db.refresh(entry)
+    return {"message": "Routine times saved", "entries": [time_entry_to_dict(entry) for entry in saved]}
 
 
 # ============================================================
