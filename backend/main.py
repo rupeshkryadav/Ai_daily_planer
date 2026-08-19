@@ -753,12 +753,39 @@ def save_dynamic_data(
     }
 
 
+@app.get("/users/me/dynamic-data/latest")
+def get_latest_dynamic_data(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    record = (
+        db.query(DynamicUserData)
+        .filter(DynamicUserData.user_id == current_user.id)
+        .order_by(DynamicUserData.recorded_at.desc())
+        .first()
+    )
+    if not record:
+        return None
+    return {
+        "study_hours": record.study_hours,
+        "work_hours": record.work_hours,
+        "exercise_minutes": record.exercise_minutes,
+        "sleep_hours": record.sleep_hours,
+        "water_goal": record.water_goal,
+        "mood": record.mood,
+        "energy_level": record.energy_level,
+        "stress_level": record.stress_level,
+        "recorded_at": record.recorded_at,
+    }
+
+
 # ============================================================
 # DAILY ROUTINE TIME DATA
 # ============================================================
 
 ROUTINE_ACTIVITIES = {
-    "wake_up", "breakfast", "lunch", "exercise", "dinner", "wind_down", "sleep",
+    "wake_up", "breakfast", "commute", "work_start", "lunch", "study", "exercise",
+    "chores", "dinner", "entertainment", "social_time", "wind_down", "sleep",
 }
 
 
