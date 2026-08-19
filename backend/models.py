@@ -74,6 +74,9 @@ class Task(Base):
 
     scheduled_time = Column(DateTime, nullable=False)
     expected_end_time = Column(DateTime, nullable=True)
+    # The available window can be much broader than the actual task effort.
+    deadline = Column(DateTime, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
 
     status = Column(
         String(30),

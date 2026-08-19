@@ -10,7 +10,7 @@ from fastapi import (
     Query,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, case
 import hashlib
@@ -289,6 +289,14 @@ class DynamicDataRequest(BaseModel):
     stress_level: float = 0
 
 
+class TaskCreateRequest(BaseModel):
+    title: str
+    start_time: datetime
+    end_time: datetime
+    duration_minutes: int = Field(gt=0, le=60 * 24 * 30)
+    priority: str = "medium"
+
+
 class TimeEntryInput(BaseModel):
     activity: str
     occurred_at: datetime
@@ -539,27 +547,94 @@ def update_profile(
 # CREATE TASK
 # ============================================================
 
+def find_free_task_slot(
+    user_id: int,
+    available_from: datetime,
+    deadline: datetime,
+    duration_minutes: int,
+    db: Session,
+) -> Optional[datetime]:
+    """Return the first task-sized gap within a user's requested window."""
+    candidate = available_from
+    requested_end = available_from + timedelta(minutes=duration_minutes)
+    if requested_end > deadline:
+        return None
+
+    planned_tasks = (
+        db.query(Task)
+        .filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+            Task.scheduled_time < deadline,
+            Task.expected_end_time.isnot(None),
+            Task.expected_end_time > available_from,
+        )
+        .order_by(Task.scheduled_time.asc())
+        .all()
+    )
+    for planned in planned_tasks:
+        if candidate + timedelta(minutes=duration_minutes) <= planned.scheduled_time:
+            return candidate
+        if planned.expected_end_time > candidate:
+            candidate = planned.expected_end_time
+
+    return candidate if candidate + timedelta(minutes=duration_minutes) <= deadline else None
+
 @app.post("/tasks/")
 def create_task(
-    title: str,
-    scheduled_time: datetime,
+    data: Optional[TaskCreateRequest] = None,
+    title: Optional[str] = Query(None),
+    scheduled_time: Optional[datetime] = Query(None),
     expected_end_time: Optional[datetime] = None,
     priority: str = "medium",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    priority = priority.lower().strip()
-    if priority not in {"low", "medium", "high"}:
+    if data:
+        final_title = data.title.strip()
+        available_from = data.start_time.replace(tzinfo=None)
+        deadline = data.end_time.replace(tzinfo=None)
+        duration_minutes = data.duration_minutes
+        final_priority = data.priority
+    else:
+        final_title = (title or "").strip()
+        available_from = scheduled_time.replace(tzinfo=None) if scheduled_time else None
+        deadline = expected_end_time.replace(tzinfo=None) if expected_end_time else None
+        duration_minutes = int((expected_end_time - scheduled_time).total_seconds() // 60) if scheduled_time and expected_end_time else None
+        final_priority = priority
+
+    if not final_title or not available_from:
+        raise HTTPException(status_code=400, detail="Title and start time are required")
+    if not deadline or deadline <= available_from:
+        raise HTTPException(status_code=400, detail="End window must be after the start window")
+    if not duration_minutes or duration_minutes <= 0:
+        raise HTTPException(status_code=400, detail="Duration must be greater than zero")
+    if available_from + timedelta(minutes=duration_minutes) > deadline:
+        raise HTTPException(status_code=400, detail="Duration must fit inside the available time window")
+
+    final_priority = final_priority.lower().strip()
+    if final_priority not in {"low", "medium", "high"}:
         raise HTTPException(status_code=400, detail="Priority must be low, medium, or high")
+
+    allocated_start = find_free_task_slot(
+        current_user.id, available_from, deadline, duration_minutes, db
+    )
+    if not allocated_start:
+        raise HTTPException(
+            status_code=409,
+            detail="No free slot of that duration exists inside the selected window",
+        )
 
     task = Task(
         user_id=current_user.id,
-        title=title,
-        message=title,
-        scheduled_time=scheduled_time,
-        expected_end_time=expected_end_time,
+        title=final_title,
+        message=final_title,
+        scheduled_time=allocated_start,
+        expected_end_time=allocated_start + timedelta(minutes=duration_minutes),
+        deadline=deadline,
+        duration_minutes=duration_minutes,
         status="pending",
-        priority=priority,
+        priority=final_priority,
     )
 
     db.add(task)
@@ -574,6 +649,10 @@ def create_task(
         "message": task.message,
         "scheduled_time": task.scheduled_time,
         "expected_end_time": task.expected_end_time,
+        "start_time": task.scheduled_time,
+        "end_time": task.deadline,
+        "deadline": task.deadline,
+        "duration_minutes": task.duration_minutes,
         "status": task.status,
         "priority": task.priority,
         "start_notified": task.start_notified,
@@ -613,6 +692,10 @@ def get_tasks(
             "message": task.message,
             "scheduled_time": task.scheduled_time,
             "expected_end_time": task.expected_end_time,
+            "start_time": task.scheduled_time,
+            "end_time": task.deadline,
+            "deadline": task.deadline,
+            "duration_minutes": task.duration_minutes,
             "status": task.status,
             "priority": task.priority,
             "user_reason": task.user_reason,
@@ -750,6 +833,35 @@ def save_dynamic_data(
     return {
         "message": "Dynamic user data saved",
         "id": record.id,
+    }
+
+
+@app.put("/users/me/dynamic-data/latest")
+def update_latest_dynamic_data(
+    data: DynamicDataRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    record = (
+        db.query(DynamicUserData)
+        .filter(DynamicUserData.user_id == current_user.id)
+        .order_by(DynamicUserData.recorded_at.desc())
+        .first()
+    )
+    if not record:
+        record = DynamicUserData(user_id=current_user.id)
+        db.add(record)
+    for field, value in data.model_dump().items():
+        setattr(record, field, value)
+    record.recorded_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return {
+        "study_hours": record.study_hours, "work_hours": record.work_hours,
+        "exercise_minutes": record.exercise_minutes, "sleep_hours": record.sleep_hours,
+        "water_goal": record.water_goal, "mood": record.mood,
+        "energy_level": record.energy_level, "stress_level": record.stress_level,
+        "recorded_at": record.recorded_at,
     }
 
 
@@ -1269,6 +1381,10 @@ def task_to_dict(task: Task):
         "message": task.message,
         "scheduled_time": task.scheduled_time,
         "expected_end_time": task.expected_end_time,
+        "start_time": task.scheduled_time,
+        "end_time": task.deadline,
+        "deadline": task.deadline,
+        "duration_minutes": task.duration_minutes,
         "status": task.status,
         "priority": task.priority,
         "user_reason": task.user_reason,
