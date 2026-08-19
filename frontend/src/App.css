@@ -45,6 +45,9 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .duration-field > div { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .duration-field input { min-width: 0; }
 .duration-field small { color: #858294; font-size: 11px; font-weight: 400; }
+.schedule-advice { display: grid; gap: 7px; padding: 13px; border: 1px solid #d7e4d0; border-radius: 9px; background: #eff5eb; color: #45613e; font-size: 12px; line-height: 1.45; }
+.schedule-advice.warning { border-color: #ead9a7; background: #fff8df; color: #725b1c; }
+.schedule-advice .secondary-button { justify-self: start; background: #fff; }
 .profile-section-label { margin-top: 23px; }
 .checkin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px 0; }
 .checkin-grid span { background: #f3f5ef; border-radius: 7px; padding: 9px; display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: #666276; }

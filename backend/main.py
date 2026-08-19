@@ -295,6 +295,7 @@ class TaskCreateRequest(BaseModel):
     end_time: datetime
     duration_minutes: int = Field(gt=0, le=60 * 24 * 30)
     priority: str = "medium"
+    use_suggested_slot: bool = False
 
 
 class TimeEntryInput(BaseModel):
@@ -547,19 +548,22 @@ def update_profile(
 # CREATE TASK
 # ============================================================
 
-def find_free_task_slot(
+ROUTINE_BLOCK_MINUTES = {
+    "wake_up": 30, "breakfast": 30, "commute": 60, "work_start": 480,
+    "lunch": 45, "study": 90, "exercise": 60, "chores": 45,
+    "dinner": 45, "entertainment": 90, "social_time": 60,
+    "wind_down": 45, "sleep": 480,
+}
+
+
+def occupied_schedule_blocks(
     user_id: int,
     available_from: datetime,
     deadline: datetime,
-    duration_minutes: int,
     db: Session,
-) -> Optional[datetime]:
-    """Return the first task-sized gap within a user's requested window."""
-    candidate = available_from
-    requested_end = available_from + timedelta(minutes=duration_minutes)
-    if requested_end > deadline:
-        return None
-
+) -> list[dict]:
+    """Return planned task and routine blocks that overlap a requested window."""
+    blocks = []
     planned_tasks = (
         db.query(Task)
         .filter(
@@ -573,12 +577,74 @@ def find_free_task_slot(
         .all()
     )
     for planned in planned_tasks:
-        if candidate + timedelta(minutes=duration_minutes) <= planned.scheduled_time:
+        blocks.append({"start": planned.scheduled_time, "end": planned.expected_end_time, "label": planned.title, "kind": "task"})
+
+    routine_entries = (
+        db.query(TimeEntry)
+        .filter(
+            TimeEntry.user_id == user_id,
+            TimeEntry.occurred_at < deadline,
+            TimeEntry.occurred_at >= available_from - timedelta(hours=12),
+        )
+        .all()
+    )
+    for entry in routine_entries:
+        end = entry.occurred_at + timedelta(minutes=ROUTINE_BLOCK_MINUTES.get(entry.activity, 30))
+        if end > available_from:
+            blocks.append({"start": entry.occurred_at, "end": end, "label": entry.activity.replace("_", " "), "kind": "routine"})
+    return sorted(blocks, key=lambda block: block["start"])
+
+
+def find_free_task_slot(
+    user_id: int,
+    available_from: datetime,
+    deadline: datetime,
+    duration_minutes: int,
+    db: Session,
+) -> Optional[datetime]:
+    """Return the first task-sized gap within a user's requested window."""
+    candidate = available_from
+    if candidate + timedelta(minutes=duration_minutes) > deadline:
+        return None
+    for block in occupied_schedule_blocks(user_id, available_from, deadline, db):
+        if candidate + timedelta(minutes=duration_minutes) <= block["start"]:
             return candidate
-        if planned.expected_end_time > candidate:
-            candidate = planned.expected_end_time
+        if block["end"] > candidate:
+            candidate = block["end"]
 
     return candidate if candidate + timedelta(minutes=duration_minutes) <= deadline else None
+
+
+@app.post("/tasks/schedule-advice")
+def schedule_advice(
+    data: TaskCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    available_from = data.start_time.replace(tzinfo=None)
+    deadline = data.end_time.replace(tzinfo=None)
+    requested_end = available_from + timedelta(minutes=data.duration_minutes)
+    if deadline <= available_from or requested_end > deadline:
+        raise HTTPException(status_code=400, detail="Duration must fit inside the selected window")
+
+    conflicts = [
+        block for block in occupied_schedule_blocks(current_user.id, available_from, requested_end, db)
+        if block["start"] < requested_end and block["end"] > available_from
+    ]
+    suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db)
+    if not conflicts:
+        return {"has_conflict": False, "message": "This time looks clear. You can keep this plan.", "suggested_start": available_from, "suggested_end": requested_end}
+    labels = ", ".join(block["label"].title() for block in conflicts[:2])
+    if suggestion:
+        suggested_end = suggestion + timedelta(minutes=data.duration_minutes)
+        return {
+            "has_conflict": True,
+            "message": f"This overlaps with {labels}. You can keep your time, or try the suggested slot.",
+            "suggested_start": suggestion,
+            "suggested_end": suggested_end,
+            "conflicts": [{"label": block["label"], "kind": block["kind"]} for block in conflicts],
+        }
+    return {"has_conflict": True, "message": f"This overlaps with {labels}. No clear slot of this length was found before the deadline, so keep it only if you can move that activity.", "suggested_start": None, "suggested_end": None, "conflicts": [{"label": block["label"], "kind": block["kind"]} for block in conflicts]}
 
 @app.post("/tasks/")
 def create_task(
@@ -616,9 +682,11 @@ def create_task(
     if final_priority not in {"low", "medium", "high"}:
         raise HTTPException(status_code=400, detail="Priority must be low, medium, or high")
 
-    allocated_start = find_free_task_slot(
-        current_user.id, available_from, deadline, duration_minutes, db
-    )
+    allocated_start = available_from
+    if data and data.use_suggested_slot:
+        allocated_start = find_free_task_slot(
+            current_user.id, available_from, deadline, duration_minutes, db
+        )
     if not allocated_start:
         raise HTTPException(
             status_code=409,
