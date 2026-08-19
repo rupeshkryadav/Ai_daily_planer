@@ -50,6 +50,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+    time_entries = relationship(
+        "TimeEntry",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
 
 
 class Task(Base):
@@ -74,11 +79,6 @@ class Task(Base):
         String(30),
         default="pending",
         nullable=False
-    )
-    time_entries = relationship(
-        "TimeEntry",
-        back_populates="user",
-        cascade="all, delete-orphan"
     )
     priority = Column(
         String(10),
