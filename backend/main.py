@@ -316,6 +316,8 @@ class TimeEntriesRequest(BaseModel):
 
 class CoachMessageRequest(BaseModel):
     message: str
+    client_time: Optional[datetime] = None
+    time_zone: str = Field(default="", max_length=64)
 
 
 # ============================================================
@@ -1288,9 +1290,17 @@ def format_orbit_datetime(value: Optional[datetime]) -> str:
     return value.strftime("%a %d %b, %I:%M %p") if value else "not set"
 
 
-def build_orbit_prompt(current_user: User, db: Session, question: str) -> str:
+def build_orbit_prompt(
+    current_user: User,
+    db: Session,
+    question: str,
+    client_time: Optional[datetime] = None,
+    time_zone: str = "",
+) -> str:
     """Build a bounded prompt from this user's actual plan and routine only."""
-    now = datetime.now()
+    # Render runs in UTC; planned tasks and routine entries are entered in the
+    # user's local time. Prefer the timestamp supplied by the signed-in app.
+    now = (client_time or datetime.now()).replace(tzinfo=None)
     upcoming_tasks = (
         db.query(Task)
         .filter(Task.user_id == current_user.id, Task.status.notin_(["completed", "skipped"]))
@@ -1332,6 +1342,11 @@ def build_orbit_prompt(current_user: User, db: Session, question: str) -> str:
         f"- {entry.activity.replace('_', ' ')}: {format_orbit_datetime(entry.occurred_at)}"
         for entry in reversed(routine_entries)
     ) or "- No routine times have been saved yet."
+    today_routine = [entry for entry in routine_entries if entry.occurred_at.date() == now.date()]
+    today_routine_text = "\n".join(
+        f"- {entry.activity.replace('_', ' ')} at {entry.occurred_at.strftime('%I:%M %p').lstrip('0')}"
+        for entry in reversed(today_routine)
+    ) or "- No routine commitments are saved for today."
     wellbeing = (
         f"sleep {daily_data.sleep_hours:g}h, energy {daily_data.energy_level:g}/10, "
         f"stress {daily_data.stress_level:g}/10, mood {daily_data.mood or 'not recorded'}"
@@ -1340,10 +1355,12 @@ def build_orbit_prompt(current_user: User, db: Session, question: str) -> str:
 
     return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
 
-Current local time: {format_orbit_datetime(now)}.
+Current user-local time: {format_orbit_datetime(now)}{f' ({time_zone})' if time_zone else ''}.
 User: {current_user.name or 'there'}.
 
 The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
+
+For scheduling questions, first account for the current user-local time, every planned task window and duration, and today's saved routine commitments. Treat a saved routine time as busy: never recommend that exact time, or the 30 minutes around it, unless the user explicitly asks to replace it. Prefer a future free slot. State why the suggested time fits and mention a conflict when you avoided one. Never answer with only a time, an asterisk, or an unexplained one-line schedule.
 
 TODAY / UPCOMING PLAN:
 {planned}
@@ -1353,6 +1370,9 @@ RECENT TASK OUTCOMES:
 
 SAVED ROUTINE TIMES:
 {routine}
+
+TODAY'S SAVED ROUTINE COMMITMENTS (BUSY TIMES):
+{today_routine_text}
 
 LATEST WELLBEING CHECK-IN:
 {wellbeing}
@@ -1509,7 +1529,9 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
     context = build_second_mind_context(current_user, db)
     response = second_mind_response(context, message)
-    response["answer"] = ask_orbit_ai(build_orbit_prompt(current_user, db, message))
+    response["answer"] = ask_orbit_ai(
+        build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone)
+    )
     response["ai_mode"] = "live"
     return response
 

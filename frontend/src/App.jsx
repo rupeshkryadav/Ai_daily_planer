@@ -166,7 +166,11 @@ function App() {
     setCoachQuestion("");
     setCoachSending(true);
     try {
-      const result = await axios.post(`${API_BASE}/users/me/coach/messages`, { message: question }, headers);
+      const result = await axios.post(`${API_BASE}/users/me/coach/messages`, {
+        message: question,
+        client_time: new Date().toISOString(),
+        time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      }, headers);
       setCoachMessages((previous) => [...previous, { role: "assistant", text: result.data.answer }]);
       setSecondMind(result.data);
     } catch (error) {
