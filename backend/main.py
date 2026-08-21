@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import os
+import re
 import urllib.error
 import urllib.request
 from dotenv import load_dotenv
@@ -1499,12 +1500,45 @@ def ask_orbit_ai(prompt: str) -> str:
         print(f"Orbit AI network request failed: {error}")
         raise HTTPException(status_code=502, detail="Orbit could not reach the AI service. Please try again shortly.")
 
-    candidates = body.get("candidates") or []
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    answer = "".join(part.get("text", "") for part in parts).strip()
+    def response_text(response_body: dict) -> str:
+        candidates = response_body.get("candidates") or []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        return "".join(part.get("text", "") for part in parts).strip()
+
+    def is_usable_answer(value: str) -> bool:
+        words = re.findall(r"[A-Za-z]{2,}", value)
+        time_fragment = re.fullmatch(r"[\d\s:–—\-().,*APMapmto]+", value)
+        return len(words) >= 8 and not time_fragment and not value.rstrip().endswith("*")
+
+    answer = response_text(body)
+    if not is_usable_answer(answer):
+        # A model can occasionally emit a partial token stream under load.
+        # Retry once with a direct formatting correction before showing anything.
+        retry_payload = json.dumps({
+            "contents": [{"role": "user", "parts": [{"text": prompt + "\n\nReturn a complete natural-language answer now. Do not return a time fragment, bare range, markdown asterisk, or partial sentence. Explain the suggested future slot and the saved routine/task conflict you avoided."}]}],
+            "generationConfig": {"maxOutputTokens": 500},
+        }).encode("utf-8")
+        try:
+            retry_request = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+                data=retry_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(retry_request, timeout=25) as retry_response:
+                retry_answer = response_text(json.loads(retry_response.read().decode("utf-8")))
+            if is_usable_answer(retry_answer):
+                answer = retry_answer
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            print(f"Orbit AI quality retry failed: {error}")
     if not answer:
         print(f"Orbit AI returned no usable answer: {body.get('promptFeedback', {})}")
         raise HTTPException(status_code=502, detail="Orbit did not return an answer. Please rephrase and try again.")
+    if not is_usable_answer(answer):
+        return (
+            "I don’t want to give you an unreliable time. Tell me roughly how long you want to spend on this, "
+            "and I’ll suggest a future slot that avoids the routine and task times you saved."
+        )
     return answer
 
 
