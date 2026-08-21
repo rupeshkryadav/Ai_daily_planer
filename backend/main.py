@@ -1581,8 +1581,11 @@ def build_orbit_safe_fallback(
     """Give a correct schedule answer if the provider sends a partial response."""
     now = user_local_now(client_time, time_zone)
     question_text = question.lower()
-    is_running = any(word in question_text for word in ("run", "running", "jog", "workout", "exercise"))
-    duration = 30 if any(word in question_text for word in ("read", "novel", "book", "run", "running", "jog")) else 25
+    is_running = any(word in question_text for word in ("run", "running", "jog"))
+    is_workout = is_running or any(word in question_text for word in ("workout", "exercise", "gym"))
+    is_reading = any(word in question_text for word in ("read", "novel", "book"))
+    is_focus_work = any(word in question_text for word in ("study", "coding", "code", "project", "assignment", "deep work"))
+    duration = 30 if is_reading or is_running else 45 if is_focus_work else 25
     day_end = datetime.combine(now.date(), datetime.max.time()).replace(hour=23, minute=30, second=0, microsecond=0)
     busy_windows = []
     for entry in db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id).all():
@@ -1602,6 +1605,12 @@ def build_orbit_safe_fallback(
         .order_by(DynamicUserData.recorded_at.desc())
         .first()
     )
+    wellbeing_status = "No recent energy check-in is saved."
+    if latest_daily_data:
+        wellbeing_status = (
+            f"Your latest check-in is energy {latest_daily_data.energy_level:g}/10, "
+            f"stress {latest_daily_data.stress_level:g}/10, and sleep {latest_daily_data.sleep_hours:g} hours."
+        )
     if latest_daily_data and (
         latest_daily_data.energy_level <= 3
         or latest_daily_data.stress_level >= 8
@@ -1614,23 +1623,37 @@ def build_orbit_safe_fallback(
 
     slot = (now + timedelta(minutes=15)).replace(second=0, microsecond=0)
     slot += timedelta(minutes=(15 - slot.minute % 15) % 15)
-    preferred_running_slots = []
-    if is_running:
+    preferred_slots = []
+    if is_workout:
         for hour, minute in ((6, 0), (6, 30), (7, 0), (7, 30), (17, 30), (18, 0), (18, 30), (19, 0)):
             candidate = datetime.combine(now.date(), datetime.min.time()).replace(hour=hour, minute=minute)
             if candidate >= slot:
-                preferred_running_slots.append(candidate)
-        if not preferred_running_slots:
+                preferred_slots.append(candidate)
+        if not preferred_slots:
             tomorrow = now.date() + timedelta(days=1)
-            preferred_running_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=6, minute=30)]
-    candidates_to_check = preferred_running_slots or [slot + timedelta(minutes=15 * index) for index in range(40)]
+            preferred_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=6, minute=30)]
+    elif is_focus_work and now.hour >= 15:
+        # Avoid late-afternoon deep work after a full day; prefer tomorrow's
+        # first focus window instead of inventing a past morning slot.
+        tomorrow = now.date() + timedelta(days=1)
+        preferred_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=8, minute=0)]
+    elif is_reading and now.hour >= 16:
+        # Reading is low-intensity and works well in a calm evening slot.
+        for hour in (18, 0, 19, 0, 20, 0):
+            candidate = datetime.combine(now.date(), datetime.min.time()).replace(hour=hour[0], minute=hour[1])
+            if candidate >= slot:
+                preferred_slots.append(candidate)
+    candidates_to_check = preferred_slots or [slot + timedelta(minutes=15 * index) for index in range(40)]
     for slot in candidates_to_check:
         slot_end = slot + timedelta(minutes=duration)
-        if slot_end <= day_end and not any(slot < end and slot_end > start for start, end in busy_windows):
-            activity = "go for a run" if is_running else "read your novel" if duration == 30 else "work on this"
+        slot_day_end = datetime.combine(slot.date(), datetime.max.time()).replace(hour=23, minute=30, second=0, microsecond=0)
+        if slot_end <= slot_day_end and not any(slot < end and slot_end > start for start, end in busy_windows):
+            activity = "go for a run" if is_running else "do your workout" if is_workout else "read your novel" if is_reading else "do focused work" if is_focus_work else "work on this"
+            day_label = "tomorrow" if slot.date() > now.date() else "today"
             return (
-                f"Try {activity} at {slot.strftime('%I:%M %p').lstrip('0')} for {duration} minutes. "
-                "It is a future free window that avoids the routine and task times you saved."
+                f"It is {now.strftime('%I:%M %p').lstrip('0')} now. {wellbeing_status} "
+                f"Plan to {activity} {day_label} at {slot.strftime('%I:%M %p').lstrip('0')} for {duration} minutes. "
+                "That is a future, activity-appropriate free window that avoids the routine and task times you saved."
             )
     return (
         "I can see that the rest of today is too tight around your saved commitments. "
@@ -1660,6 +1683,17 @@ def coach_message(
     context = build_second_mind_context(current_user, db)
     response = second_mind_response(context, message)
     safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone)
+    scheduling_question = any(word in message.lower() for word in (
+        "when", "what time", "schedule", "plan", "running", "run", "jog", "workout", "exercise",
+        "study", "read", "novel", "book", "coding", "code", "project",
+    ))
+    if scheduling_question:
+        # Time recommendations are computed from hard scheduling constraints,
+        # not delegated to a generative model that can suggest past or blocked
+        # times. General conversation remains live AI below.
+        response["answer"] = safe_fallback
+        response["ai_mode"] = "schedule-aware"
+        return response
     try:
         response["answer"] = ask_orbit_ai(
             build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone),
