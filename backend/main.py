@@ -1370,7 +1370,11 @@ def ask_orbit_ai(prompt: str) -> str:
             detail="Orbit AI is not configured yet. Add GEMINI_API_KEY to the backend environment and redeploy.",
         )
 
-    model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip()
+    # Render users commonly copy the REST resource name ("models/..."), while
+    # this endpoint builds that path segment itself. Support both forms.
+    model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip().removeprefix("models/")
+    if not model or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_" for character in model):
+        raise HTTPException(status_code=503, detail="ORBIT_AI_MODEL must be a Gemini model ID, for example gemini-2.5-flash.")
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.55, "maxOutputTokens": 350},
