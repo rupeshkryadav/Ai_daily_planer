@@ -1758,8 +1758,8 @@ def build_orbit_safe_fallback(
         preferred_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=8, minute=0)]
     elif is_reading and now.hour >= 16:
         # Reading is low-intensity and works well in a calm evening slot.
-        for hour in (18, 0, 19, 0, 20, 0):
-            candidate = datetime.combine(now.date(), datetime.min.time()).replace(hour=hour[0], minute=hour[1])
+        for hour, minute in ((18, 0), (19, 0), (20, 0)):
+            candidate = datetime.combine(now.date(), datetime.min.time()).replace(hour=hour, minute=minute)
             if candidate >= slot:
                 preferred_slots.append(candidate)
     candidates_to_check = preferred_slots or [slot + timedelta(minutes=15 * index) for index in range(40)]
