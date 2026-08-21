@@ -1212,17 +1212,81 @@ def bootstrap_profile(current_user: User) -> dict:
     }
 
 
-def build_second_mind_context(current_user: User, db: Session) -> dict:
+def infer_today_state(current_user: User, db: Session, now: datetime) -> dict:
+    """Estimate fresh scheduling signals from today's real activity—not profile defaults."""
+    day_start = datetime.combine(now.date(), datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+    today_tasks = db.query(Task).filter(
+        Task.user_id == current_user.id,
+        Task.scheduled_time >= day_start,
+        Task.scheduled_time < day_end,
+    ).all()
+    today_routine = db.query(TimeEntry).filter(
+        TimeEntry.user_id == current_user.id,
+        TimeEntry.occurred_at >= day_start,
+        TimeEntry.occurred_at < day_end,
+    ).all()
+    completed = [task for task in today_tasks if task.status == "completed"]
+    unfinished = [task for task in today_tasks if task.status not in ("completed", "skipped")]
+    overdue = [task for task in unfinished if (task.expected_end_time or task.scheduled_time) < now]
+    planned_minutes = sum(task.duration_minutes or 30 for task in today_tasks)
+    completed_minutes = sum(task.duration_minutes or 30 for task in completed)
+
+    # Find a real sleep span when both events were logged, including the
+    # previous evening's sleep event and today's wake-up.
+    recent_routine = db.query(TimeEntry).filter(
+        TimeEntry.user_id == current_user.id,
+        TimeEntry.occurred_at >= day_start - timedelta(days=1),
+        TimeEntry.occurred_at < day_end,
+    ).order_by(TimeEntry.occurred_at.asc()).all()
+    sleep_hours = None
+    sleep_entries = [entry for entry in recent_routine if entry.activity == "sleep"]
+    wake_entries = [entry for entry in recent_routine if entry.activity == "wake_up"]
+    if sleep_entries and wake_entries:
+        last_sleep = sleep_entries[-1]
+        following_wakes = [entry for entry in wake_entries if entry.occurred_at > last_sleep.occurred_at]
+        if following_wakes:
+            sleep_hours = round((following_wakes[0].occurred_at - last_sleep.occurred_at).total_seconds() / 3600, 1)
+
+    energy = 7
+    if now.hour >= 16:
+        energy -= 1
+    if now.hour >= 21:
+        energy -= 1
+    if sleep_hours is not None and sleep_hours < 6:
+        energy -= 2
+    if planned_minutes >= 480:
+        energy -= 1
+    if len(overdue) >= 2:
+        energy -= 1
+    if completed_minutes >= 90:
+        energy -= 1
+    energy = max(1, min(10, energy))
+
+    stress = 3 + min(3, len(overdue)) + (1 if planned_minutes >= 480 else 0)
+    if completed and not overdue:
+        stress -= 1
+    stress = max(1, min(10, stress))
+    latest_activity = max((entry for entry in today_routine if entry.occurred_at <= now), key=lambda entry: entry.occurred_at, default=None)
+    return {
+        "energy": energy,
+        "stress": stress,
+        "sleep": sleep_hours,
+        "planned_minutes": planned_minutes,
+        "completed_minutes": completed_minutes,
+        "overdue_count": len(overdue),
+        "latest_activity": latest_activity.activity.replace("_", " ") if latest_activity else None,
+        "source": "Inferred from today's routine, task load, progress, and time of day.",
+    }
+
+
+def build_second_mind_context(current_user: User, db: Session, now: Optional[datetime] = None) -> dict:
     """Blend a temporary synthetic prior into real user signals until sufficient history exists."""
     tasks = db.query(Task).filter(Task.user_id == current_user.id).all()
     completed = [task for task in tasks if task.status == "completed"]
     prior = bootstrap_profile(current_user)
-    latest_daily_data = (
-        db.query(DynamicUserData)
-        .filter(DynamicUserData.user_id == current_user.id)
-        .order_by(DynamicUserData.recorded_at.desc())
-        .first()
-    )
+    now = now or datetime.now()
+    today_state = infer_today_state(current_user, db, now)
     completed_by_hour = {}
     for task in completed:
         hour = task.scheduled_time.hour
@@ -1258,16 +1322,15 @@ def build_second_mind_context(current_user: User, db: Session) -> dict:
         data_mode = "bootstrap"
         data_source = "Using a temporary starter profile based on your onboarding preferences; no synthetic events are saved to your history."
 
-    mood_value = (latest_daily_data.mood if latest_daily_data else "Neutral") or "Neutral"
-    energy_value = latest_daily_data.energy_level if latest_daily_data else prior["energy"]
-    stress_value = latest_daily_data.stress_level if latest_daily_data else prior["stress"]
-    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else prior["sleep_hours"]
+    energy_value = today_state["energy"]
+    stress_value = today_state["stress"]
+    sleep_value = today_state["sleep"] if today_state["sleep"] is not None else prior["sleep_hours"]
     ml_input = {
         "sleep_hours": sleep_value,
-        "work_hours": latest_daily_data.work_hours if latest_daily_data else prior["work_hours"],
+        "work_hours": today_state["planned_minutes"] / 60,
         "screen_time_hours": current_user.daily_screen_time or 0,
-        "exercise_minutes": latest_daily_data.exercise_minutes if latest_daily_data else prior["exercise_minutes"],
-        "mood": {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}.get(str(mood_value).lower(), 2),
+        "exercise_minutes": prior["exercise_minutes"],
+        "mood": 2,
         "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
         "stress_level": stress_value,
         "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
@@ -1288,6 +1351,7 @@ def build_second_mind_context(current_user: User, db: Session) -> dict:
         "energy": energy_value,
         "stress": stress_value,
         "sleep": sleep_value,
+        "today_state": today_state,
     }
 
 
@@ -1415,10 +1479,12 @@ def build_orbit_prompt(
         f"{future_routine[0].occurred_at.strftime('%I:%M %p').lstrip('0')}."
         if past_routine and future_routine else "No current routine interval can be inferred from today's saved times."
     )
+    inferred_state = infer_today_state(current_user, db, now)
     wellbeing = (
-        f"sleep {daily_data.sleep_hours:g}h, energy {daily_data.energy_level:g}/10, "
-        f"stress {daily_data.stress_level:g}/10, mood {daily_data.mood or 'not recorded'}"
-        if daily_data else "No wellbeing check-in has been recorded."
+        f"inferred energy {inferred_state['energy']}/10, inferred stress {inferred_state['stress']}/10, "
+        f"sleep {inferred_state['sleep'] if inferred_state['sleep'] is not None else 'not logged'} hours, "
+        f"planned {inferred_state['planned_minutes']} min, completed {inferred_state['completed_minutes']} min, "
+        f"overdue tasks {inferred_state['overdue_count']}. {inferred_state['source']}"
     )
     review_summary = (
         f"Routine {latest_review.routine_status.replace('_', ' ')}; "
@@ -1661,22 +1727,13 @@ def build_orbit_safe_fallback(
             task_end = task.expected_end_time or (task.scheduled_time + timedelta(minutes=task.duration_minutes or 30))
             busy_windows.append((task.scheduled_time, task_end))
 
-    latest_daily_data = (
-        db.query(DynamicUserData)
-        .filter(DynamicUserData.user_id == current_user.id)
-        .order_by(DynamicUserData.recorded_at.desc())
-        .first()
+    inferred_state = infer_today_state(current_user, db, now)
+    wellbeing_status = (
+        f"Based on today’s routine and workload, Orbit estimates energy {inferred_state['energy']}/10 "
+        f"and stress {inferred_state['stress']}/10."
     )
-    wellbeing_status = "No recent energy check-in is saved."
-    if latest_daily_data:
-        wellbeing_status = (
-            f"Your latest check-in is energy {latest_daily_data.energy_level:g}/10, "
-            f"stress {latest_daily_data.stress_level:g}/10, and sleep {latest_daily_data.sleep_hours:g} hours."
-        )
-    if latest_daily_data and (
-        latest_daily_data.energy_level <= 3
-        or latest_daily_data.stress_level >= 8
-        or (0 < latest_daily_data.sleep_hours < 6)
+    if inferred_state["energy"] <= 3 or inferred_state["stress"] >= 8 or (
+        inferred_state["sleep"] is not None and inferred_state["sleep"] < 6
     ):
         return (
             "Your latest check-in suggests recovery first, so I would not schedule a demanding session right now. "
@@ -1725,11 +1782,18 @@ def build_orbit_safe_fallback(
             if start > cursor:
                 largest_free = max(largest_free, start - cursor)
             cursor = max(cursor, end)
+        flexible_task = next((task for task in sorted(today_tasks, key=lambda item: item.scheduled_time)
+                              if task.status == "pending" and task.priority == "low" and task.scheduled_time >= now), None)
+        tradeoff = (
+            f" The most flexible planned item is '{flexible_task.title}' at "
+            f"{flexible_task.scheduled_time.strftime('%I:%M %p').lstrip('0')}; moving it is the first trade-off to consider."
+            if flexible_task else ""
+        )
         return (
             f"It is {now.strftime('%I:%M %p').lstrip('0')} now. {wellbeing_status} "
             f"I cannot find one uninterrupted {duration}-minute window left today after protecting your saved tasks and routine. "
             f"The largest remaining gap is about {max(0, round(largest_free.total_seconds() / 60))} minutes. "
-            "You could split the work into two focused blocks today, or move the full session to tomorrow morning."
+            f"You could split the work into two focused blocks today, or move the full session to tomorrow morning.{tradeoff}"
         )
     return (
         "I can see that the rest of today is too tight around your saved commitments. "
@@ -1756,8 +1820,10 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Ask Orbit a question first")
     if len(message) > 500:
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
-    context = build_second_mind_context(current_user, db)
+    local_now = user_local_now(data.client_time, data.time_zone)
+    context = build_second_mind_context(current_user, db, local_now)
     response = second_mind_response(context, message)
+    response["today_state"] = context["today_state"]
     safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone)
     scheduling_question = any(word in message.lower() for word in (
         "when", "what time", "schedule", "plan", "running", "run", "jog", "workout", "exercise",
