@@ -1433,9 +1433,16 @@ def ask_orbit_ai(prompt: str) -> str:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         # Log Gemini's diagnostic body on Render, but return only a safe and
-        # actionable category to the signed-in user.
+        # actionable diagnostic to the signed-in user. Gemini never needs to
+        # echo the API key, but redact it defensively before returning text.
         diagnostic = error.read().decode("utf-8", errors="replace")[:1000]
+        diagnostic = diagnostic.replace(api_key, "[redacted]")
         print(f"Orbit AI HTTP {error.code}: {diagnostic}")
+        try:
+            provider_message = json.loads(diagnostic).get("error", {}).get("message", "")
+        except json.JSONDecodeError:
+            provider_message = ""
+        provider_message = " ".join(provider_message.split())[:350]
         messages = {
             400: "Orbit AI rejected the request. Check the configured Gemini model name.",
             401: "Orbit AI could not authenticate the Gemini API key. Create a new key and update Render.",
@@ -1443,7 +1450,10 @@ def ask_orbit_ai(prompt: str) -> str:
             404: "The configured Gemini model is unavailable for this key. Set ORBIT_AI_MODEL to an available Gemini model.",
             429: "Gemini quota is currently exhausted. Check your AI Studio quota or try again later.",
         }
-        raise HTTPException(status_code=502, detail=messages.get(error.code, "Orbit AI is temporarily unavailable. Please try again shortly."))
+        message = messages.get(error.code, "Orbit AI is temporarily unavailable. Please try again shortly.")
+        if provider_message:
+            message = f"{message} Gemini says: {provider_message}"
+        raise HTTPException(status_code=502, detail=message)
     except (urllib.error.URLError, TimeoutError) as error:
         print(f"Orbit AI network request failed: {error}")
         raise HTTPException(status_code=502, detail="Orbit could not reach the AI service. Please try again shortly.")
