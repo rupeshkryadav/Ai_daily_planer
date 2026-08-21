@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import os
+import urllib.error
+import urllib.request
+from dotenv import load_dotenv
+
+# Local development reads backend/.env; production platforms provide the same
+# values as environment variables. Never put API keys in the frontend.
+load_dotenv()
 
 from fastapi import (
     FastAPI,
@@ -1276,6 +1283,120 @@ def second_mind_response(context: dict, request: str = "") -> dict:
     }
 
 
+def format_orbit_datetime(value: Optional[datetime]) -> str:
+    """Return a compact, timezone-neutral timestamp for the model prompt."""
+    return value.strftime("%a %d %b, %I:%M %p") if value else "not set"
+
+
+def build_orbit_prompt(current_user: User, db: Session, question: str) -> str:
+    """Build a bounded prompt from this user's actual plan and routine only."""
+    now = datetime.now()
+    upcoming_tasks = (
+        db.query(Task)
+        .filter(Task.user_id == current_user.id, Task.status.notin_(["completed", "skipped"]))
+        .order_by(Task.scheduled_time.asc())
+        .limit(20)
+        .all()
+    )
+    recent_tasks = (
+        db.query(Task)
+        .filter(Task.user_id == current_user.id, Task.status.in_(["completed", "skipped"]))
+        .order_by(Task.updated_at.desc())
+        .limit(10)
+        .all()
+    )
+    routine_entries = (
+        db.query(TimeEntry)
+        .filter(TimeEntry.user_id == current_user.id)
+        .order_by(TimeEntry.occurred_at.desc())
+        .limit(40)
+        .all()
+    )
+    daily_data = (
+        db.query(DynamicUserData)
+        .filter(DynamicUserData.user_id == current_user.id)
+        .order_by(DynamicUserData.recorded_at.desc())
+        .first()
+    )
+
+    planned = "\n".join(
+        f"- {task.title} | {task.priority} priority | planned {format_orbit_datetime(task.scheduled_time)}"
+        f" | duration {task.duration_minutes or 'unspecified'} min | available until {format_orbit_datetime(task.deadline)}"
+        for task in upcoming_tasks
+    ) or "- No upcoming tasks have been planned."
+    history = "\n".join(
+        f"- {task.title} | {task.status} | scheduled {format_orbit_datetime(task.scheduled_time)}"
+        for task in recent_tasks
+    ) or "- No completed or skipped tasks yet."
+    routine = "\n".join(
+        f"- {entry.activity.replace('_', ' ')}: {format_orbit_datetime(entry.occurred_at)}"
+        for entry in reversed(routine_entries)
+    ) or "- No routine times have been saved yet."
+    wellbeing = (
+        f"sleep {daily_data.sleep_hours:g}h, energy {daily_data.energy_level:g}/10, "
+        f"stress {daily_data.stress_level:g}/10, mood {daily_data.mood or 'not recorded'}"
+        if daily_data else "No wellbeing check-in has been recorded."
+    )
+
+    return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
+
+Current local time: {format_orbit_datetime(now)}.
+User: {current_user.name or 'there'}.
+
+The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
+
+TODAY / UPCOMING PLAN:
+{planned}
+
+RECENT TASK OUTCOMES:
+{history}
+
+SAVED ROUTINE TIMES:
+{routine}
+
+LATEST WELLBEING CHECK-IN:
+{wellbeing}
+
+User question: {question}
+"""
+
+
+def ask_orbit_ai(prompt: str) -> str:
+    """Call Gemini server-side and return its text, with no synthetic fallback."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Orbit AI is not configured yet. Add GEMINI_API_KEY to the backend environment and redeploy.",
+        )
+
+    model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip()
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.55, "maxOutputTokens": 350},
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+        print(f"Orbit AI request failed: {error}")
+        raise HTTPException(status_code=502, detail="Orbit could not reach the AI service. Please try again shortly.")
+
+    candidates = body.get("candidates") or []
+    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+    answer = "".join(part.get("text", "") for part in parts).strip()
+    if not answer:
+        print(f"Orbit AI returned no usable answer: {body.get('promptFeedback', {})}")
+        raise HTTPException(status_code=502, detail="Orbit did not return an answer. Please rephrase and try again.")
+    return answer
+
+
 @app.get("/users/me/second-mind")
 def second_mind(
     current_user: User = Depends(get_current_user),
@@ -1295,7 +1416,11 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Ask Orbit a question first")
     if len(message) > 500:
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
-    return second_mind_response(build_second_mind_context(current_user, db), message)
+    context = build_second_mind_context(current_user, db)
+    response = second_mind_response(context, message)
+    response["answer"] = ask_orbit_ai(build_orbit_prompt(current_user, db, message))
+    response["ai_mode"] = "live"
+    return response
 
 @app.get("/users/me/recommendations")
 def recommendations(
