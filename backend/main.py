@@ -1396,6 +1396,22 @@ def ask_orbit_ai(prompt: str) -> str:
             if candidate in generative_models:
                 model = candidate
                 break
+        else:
+            # Google periodically retires and introduces model IDs. If this
+            # key only exposes a newer Flash model, use it automatically.
+            safe_flash_models = sorted(
+                candidate for candidate in generative_models
+                if "flash" in candidate and not any(
+                    excluded in candidate for excluded in ("audio", "image", "tts", "live")
+                )
+            )
+            if safe_flash_models:
+                model = safe_flash_models[-1]
+            elif not generative_models:
+                raise HTTPException(
+                    status_code=503,
+                    detail="This Gemini API key has no text-generation models enabled. Create an unrestricted key in Google AI Studio and verify its project has Gemini API access.",
+                )
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         # The generation call below gives the user the final actionable error.
         print(f"Orbit AI model discovery failed; using configured model: {error}")
@@ -1403,7 +1419,8 @@ def ask_orbit_ai(prompt: str) -> str:
     print(f"Orbit AI using Gemini model: {model}")
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.55, "maxOutputTokens": 350},
+        # Keep the configuration portable across Gemini model generations.
+        "generationConfig": {"maxOutputTokens": 350},
     }).encode("utf-8")
     request = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
