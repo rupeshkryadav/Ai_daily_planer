@@ -1384,8 +1384,21 @@ def ask_orbit_ai(prompt: str) -> str:
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
             body = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
-        print(f"Orbit AI request failed: {error}")
+    except urllib.error.HTTPError as error:
+        # Log Gemini's diagnostic body on Render, but return only a safe and
+        # actionable category to the signed-in user.
+        diagnostic = error.read().decode("utf-8", errors="replace")[:1000]
+        print(f"Orbit AI HTTP {error.code}: {diagnostic}")
+        messages = {
+            400: "Orbit AI rejected the request. Check the configured Gemini model name.",
+            401: "Orbit AI could not authenticate the Gemini API key. Create a new key and update Render.",
+            403: "Gemini denied this key. Check its API restrictions, billing/quota, and Generative Language API access.",
+            404: "The configured Gemini model is unavailable for this key. Set ORBIT_AI_MODEL to an available Gemini model.",
+            429: "Gemini quota is currently exhausted. Check your AI Studio quota or try again later.",
+        }
+        raise HTTPException(status_code=502, detail=messages.get(error.code, "Orbit AI is temporarily unavailable. Please try again shortly."))
+    except (urllib.error.URLError, TimeoutError) as error:
+        print(f"Orbit AI network request failed: {error}")
         raise HTTPException(status_code=502, detail="Orbit could not reach the AI service. Please try again shortly.")
 
     candidates = body.get("candidates") or []
