@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import os
 import re
 import urllib.error
@@ -1291,6 +1292,18 @@ def format_orbit_datetime(value: Optional[datetime]) -> str:
     return value.strftime("%a %d %b, %I:%M %p") if value else "not set"
 
 
+def user_local_now(client_time: Optional[datetime], time_zone: str = "") -> datetime:
+    """Convert the browser's UTC timestamp to the user's stated IANA timezone."""
+    if not client_time:
+        return datetime.now()
+    if client_time.tzinfo is None:
+        return client_time
+    try:
+        return client_time.astimezone(ZoneInfo(time_zone or "UTC")).replace(tzinfo=None)
+    except ZoneInfoNotFoundError:
+        return client_time.astimezone().replace(tzinfo=None)
+
+
 def build_orbit_prompt(
     current_user: User,
     db: Session,
@@ -1301,7 +1314,7 @@ def build_orbit_prompt(
     """Build a bounded prompt from this user's actual plan and routine only."""
     # Render runs in UTC; planned tasks and routine entries are entered in the
     # user's local time. Prefer the timestamp supplied by the signed-in app.
-    now = (client_time or datetime.now()).replace(tzinfo=None)
+    now = user_local_now(client_time, time_zone)
     upcoming_tasks = (
         db.query(Task)
         .filter(Task.user_id == current_user.id, Task.status.notin_(["completed", "skipped"]))
@@ -1348,6 +1361,15 @@ def build_orbit_prompt(
         f"- {entry.activity.replace('_', ' ')} at {entry.occurred_at.strftime('%I:%M %p').lstrip('0')}"
         for entry in reversed(today_routine)
     ) or "- No routine commitments are saved for today."
+    past_routine = sorted(entry for entry in today_routine if entry.occurred_at <= now)
+    future_routine = sorted(entry for entry in today_routine if entry.occurred_at > now)
+    routine_state = (
+        f"Likely in {past_routine[-1].activity.replace('_', ' ')} since "
+        f"{past_routine[-1].occurred_at.strftime('%I:%M %p').lstrip('0')}; "
+        f"next saved commitment is {future_routine[0].activity.replace('_', ' ')} at "
+        f"{future_routine[0].occurred_at.strftime('%I:%M %p').lstrip('0')}."
+        if past_routine and future_routine else "No current routine interval can be inferred from today's saved times."
+    )
     wellbeing = (
         f"sleep {daily_data.sleep_hours:g}h, energy {daily_data.energy_level:g}/10, "
         f"stress {daily_data.stress_level:g}/10, mood {daily_data.mood or 'not recorded'}"
@@ -1363,6 +1385,8 @@ The following is private, real data from this user's account. Use it to answer a
 
 For scheduling questions, first account for the current user-local time, every planned task window and duration, and today's saved routine commitments. Treat a saved routine time as busy: never recommend that exact time, or the 30 minutes around it, unless the user explicitly asks to replace it. Prefer a future free slot. State why the suggested time fits and mention a conflict when you avoided one. Never answer with only a time, an asterisk, or an unexplained one-line schedule.
 
+Match the time to the activity: running and workouts belong in a safe morning or early-evening window, not the middle of work or near bedtime. If it is already afternoon, do not suggest a past morning time for today. Use the latest sleep, energy and stress signals; when recovery is needed, say so and recommend a lighter option instead of a demanding activity.
+
 TODAY / UPCOMING PLAN:
 {planned}
 
@@ -1374,6 +1398,9 @@ SAVED ROUTINE TIMES:
 
 TODAY'S SAVED ROUTINE COMMITMENTS (BUSY TIMES):
 {today_routine_text}
+
+INFERRED CURRENT ROUTINE STATE:
+{routine_state}
 
 LATEST WELLBEING CHECK-IN:
 {wellbeing}
@@ -1549,10 +1576,13 @@ def build_orbit_safe_fallback(
     db: Session,
     question: str,
     client_time: Optional[datetime],
+    time_zone: str,
 ) -> str:
     """Give a correct schedule answer if the provider sends a partial response."""
-    now = (client_time or datetime.now()).replace(tzinfo=None)
-    duration = 30 if any(word in question.lower() for word in ("read", "novel", "book")) else 25
+    now = user_local_now(client_time, time_zone)
+    question_text = question.lower()
+    is_running = any(word in question_text for word in ("run", "running", "jog", "workout", "exercise"))
+    duration = 30 if any(word in question_text for word in ("read", "novel", "book", "run", "running", "jog")) else 25
     day_end = datetime.combine(now.date(), datetime.max.time()).replace(hour=23, minute=30, second=0, microsecond=0)
     busy_windows = []
     for entry in db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id).all():
@@ -1566,17 +1596,42 @@ def build_orbit_safe_fallback(
             task_end = task.expected_end_time or (task.scheduled_time + timedelta(minutes=task.duration_minutes or 30))
             busy_windows.append((task.scheduled_time, task_end))
 
+    latest_daily_data = (
+        db.query(DynamicUserData)
+        .filter(DynamicUserData.user_id == current_user.id)
+        .order_by(DynamicUserData.recorded_at.desc())
+        .first()
+    )
+    if latest_daily_data and (
+        latest_daily_data.energy_level <= 3
+        or latest_daily_data.stress_level >= 8
+        or (0 < latest_daily_data.sleep_hours < 6)
+    ):
+        return (
+            "Your latest check-in suggests recovery first, so I would not schedule a demanding session right now. "
+            "Take a short walk, hydrate, or choose a light activity, then reassess your energy before planning exercise."
+        )
+
     slot = (now + timedelta(minutes=15)).replace(second=0, microsecond=0)
     slot += timedelta(minutes=(15 - slot.minute % 15) % 15)
-    while slot + timedelta(minutes=duration) <= day_end:
+    preferred_running_slots = []
+    if is_running:
+        for hour, minute in ((6, 0), (6, 30), (7, 0), (7, 30), (17, 30), (18, 0), (18, 30), (19, 0)):
+            candidate = datetime.combine(now.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+            if candidate >= slot:
+                preferred_running_slots.append(candidate)
+        if not preferred_running_slots:
+            tomorrow = now.date() + timedelta(days=1)
+            preferred_running_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=6, minute=30)]
+    candidates_to_check = preferred_running_slots or [slot + timedelta(minutes=15 * index) for index in range(40)]
+    for slot in candidates_to_check:
         slot_end = slot + timedelta(minutes=duration)
-        if not any(slot < end and slot_end > start for start, end in busy_windows):
-            activity = "read your novel" if duration == 30 else "work on this"
+        if slot_end <= day_end and not any(slot < end and slot_end > start for start, end in busy_windows):
+            activity = "go for a run" if is_running else "read your novel" if duration == 30 else "work on this"
             return (
                 f"Try {activity} at {slot.strftime('%I:%M %p').lstrip('0')} for {duration} minutes. "
-                "That is the next free window I can see after your current time, while avoiding the routine and task times you saved."
+                "It is a future free window that avoids the routine and task times you saved."
             )
-        slot += timedelta(minutes=15)
     return (
         "I can see that the rest of today is too tight around your saved commitments. "
         "Plan a 30-minute session tomorrow, and I’ll help you choose a specific window once tomorrow’s routine is saved."
@@ -1604,7 +1659,7 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
     context = build_second_mind_context(current_user, db)
     response = second_mind_response(context, message)
-    safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time)
+    safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone)
     try:
         response["answer"] = ask_orbit_ai(
             build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone),
