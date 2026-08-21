@@ -1374,6 +1374,7 @@ def ask_orbit_ai(prompt: str) -> str:
     # this endpoint builds that path segment itself. Support both forms.
     preferred_model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip().removeprefix("models/")
     model = preferred_model
+    model_candidates = [preferred_model]
     if not model or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_" for character in model):
         raise HTTPException(status_code=503, detail="ORBIT_AI_MODEL must be a Gemini model ID, for example gemini-2.5-flash.")
 
@@ -1392,45 +1393,65 @@ def ask_orbit_ai(prompt: str) -> str:
             for item in available_models
             if "generateContent" in item.get("supportedGenerationMethods", [])
         }
-        for candidate in (preferred_model, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"):
-            if candidate in generative_models:
-                model = candidate
-                break
-        else:
-            # Google periodically retires and introduces model IDs. If this
-            # key only exposes a newer Flash model, use it automatically.
-            safe_flash_models = sorted(
-                candidate for candidate in generative_models
-                if "flash" in candidate and not any(
-                    excluded in candidate for excluded in ("audio", "image", "tts", "live")
-                )
+        if not generative_models:
+            raise HTTPException(
+                status_code=503,
+                detail="This Gemini API key has no text-generation models enabled. Create an unrestricted key in Google AI Studio and verify its project has Gemini API access.",
             )
-            if safe_flash_models:
-                model = safe_flash_models[-1]
-            elif not generative_models:
-                raise HTTPException(
-                    status_code=503,
-                    detail="This Gemini API key has no text-generation models enabled. Create an unrestricted key in Google AI Studio and verify its project has Gemini API access.",
-                )
+        # Try the requested/current IDs first, then any other supported Flash
+        # model. This keeps Orbit available when one Gemini model is busy.
+        safe_flash_models = sorted(
+            candidate for candidate in generative_models
+            if "flash" in candidate and not any(
+                excluded in candidate for excluded in ("audio", "image", "tts", "live")
+            )
+        )
+        preferred_candidates = [
+            preferred_model, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
+        ] + list(reversed(safe_flash_models))
+        model_candidates = []
+        for candidate in preferred_candidates:
+            if candidate in generative_models and candidate not in model_candidates:
+                model_candidates.append(candidate)
+        if model_candidates:
+            model = model_candidates[0]
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         # The generation call below gives the user the final actionable error.
         print(f"Orbit AI model discovery failed; using configured model: {error}")
 
-    print(f"Orbit AI using Gemini model: {model}")
+    print(f"Orbit AI candidate Gemini models: {', '.join(model_candidates)}")
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         # Keep the configuration portable across Gemini model generations.
         "generationConfig": {"maxOutputTokens": 350},
     }).encode("utf-8")
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    last_busy_diagnostic = ""
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        body = None
+        for index, model in enumerate(model_candidates):
+            request = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                print(f"Orbit AI answered with Gemini model: {model}")
+                break
+            except urllib.error.HTTPError as error:
+                diagnostic = error.read().decode("utf-8", errors="replace")[:1000]
+                if error.code == 503 and index < len(model_candidates) - 1:
+                    last_busy_diagnostic = diagnostic
+                    print(f"Orbit AI model {model} is busy; trying the next available model")
+                    continue
+                raise
+        if body is None and last_busy_diagnostic:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini is temporarily busy across the available models for this key. Please try again in a minute.",
+            )
     except urllib.error.HTTPError as error:
         # Log Gemini's diagnostic body on Render, but return only a safe and
         # actionable diagnostic to the signed-in user. Gemini never needs to
