@@ -36,6 +36,7 @@ class User(Base):
     preferred_focus_time = Column(String(30), nullable=True)
     planning_style = Column(String(30), nullable=True)
     daily_screen_time = Column(Float, nullable=True)
+    daily_free_hours = Column(Float, nullable=True)
     preferred_task_difficulty = Column(String(20), nullable=True)
     onboarding_complete = Column(Boolean, default=False, nullable=False)
 

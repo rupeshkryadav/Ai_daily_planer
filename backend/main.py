@@ -283,6 +283,7 @@ class ProfileUpdate(BaseModel):
     preferred_focus_time: Optional[str] = None
     planning_style: Optional[str] = None
     daily_screen_time: Optional[float] = None
+    daily_free_hours: Optional[float] = Field(default=None, ge=0, le=24)
     preferred_task_difficulty: Optional[str] = None
     onboarding_complete: Optional[bool] = None
 
@@ -495,6 +496,7 @@ def get_me(
         "preferred_focus_time": current_user.preferred_focus_time,
         "planning_style": current_user.planning_style,
         "daily_screen_time": current_user.daily_screen_time,
+        "daily_free_hours": current_user.daily_free_hours,
         "preferred_task_difficulty": current_user.preferred_task_difficulty,
         "onboarding_complete": current_user.onboarding_complete,
     }
@@ -533,6 +535,8 @@ def update_profile(
 
     if data.daily_screen_time is not None:
         current_user.daily_screen_time = data.daily_screen_time
+    if data.daily_free_hours is not None:
+        current_user.daily_free_hours = data.daily_free_hours
 
     if data.preferred_task_difficulty is not None:
         current_user.preferred_task_difficulty = data.preferred_task_difficulty
@@ -556,6 +560,7 @@ def update_profile(
             "preferred_focus_time": current_user.preferred_focus_time,
             "planning_style": current_user.planning_style,
             "daily_screen_time": current_user.daily_screen_time,
+            "daily_free_hours": current_user.daily_free_hours,
             "preferred_task_difficulty": current_user.preferred_task_difficulty,
             "onboarding_complete": current_user.onboarding_complete,
         },
@@ -1203,6 +1208,7 @@ def bootstrap_profile(current_user: User) -> dict:
         )
     return {
         "focus_hour": focus_hour,
+        "daily_free_hours": current_user.daily_free_hours or 0,
         "sleep_hours": 7.5,
         "work_hours": 8 if current_user.use_case == "professional" else 4 if current_user.use_case == "student" else 2,
         "exercise_minutes": 30,
@@ -1502,6 +1508,8 @@ User: {current_user.name or 'there'}.
 The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
 
 For scheduling questions, first account for the current user-local time, every planned task window and duration, and today's saved routine commitments. Treat a saved routine time as busy: never recommend that exact time, or the 30 minutes around it, unless the user explicitly asks to replace it. Prefer a future free slot. State why the suggested time fits and mention a conflict when you avoided one. Never answer with only a time, an asterisk, or an unexplained one-line schedule.
+
+If a user asks to create or schedule a task but has not supplied duration or deadline/available window, ask only for the missing fields before proposing a schedule. Their stated daily free-time estimate is {current_user.daily_free_hours or 'not set'} hours; use it as a workload limit, while task and routine times remain the source of exact free slots.
 
 Match the time to the activity: running and workouts belong in a safe morning or early-evening window, not the middle of work or near bedtime. If it is already afternoon, do not suggest a past morning time for today. Use the latest sleep, energy and stress signals; when recovery is needed, say so and recommend a lighter option instead of a demanding activity.
 
