@@ -164,3 +164,19 @@ class TimeEntry(Base):
     recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="time_entries")
+
+
+class DailyReview(Base):
+    """End-of-day reality check used to improve future Orbit guidance."""
+    __tablename__ = "daily_reviews"
+    __table_args__ = (UniqueConstraint("user_id", "review_date", name="uq_daily_review"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    review_date = Column(DateTime, nullable=False, index=True)
+    routine_status = Column(String(30), nullable=False)
+    notes = Column(Text, nullable=True)
+    completed_tasks = Column(Integer, default=0, nullable=False)
+    skipped_tasks = Column(Integer, default=0, nullable=False)
+    rescheduled_tasks = Column(Integer, default=0, nullable=False)
+    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -29,7 +29,7 @@ import base64
 import json
 
 from database import engine, Base, get_db, migrate_legacy_schema, SessionLocal
-from models import User, Task, DynamicUserData, TimeEntry
+from models import User, Task, DynamicUserData, TimeEntry, DailyReview
 from ml_helper import predict_task_insights
 
 
@@ -318,6 +318,13 @@ class TimeEntriesRequest(BaseModel):
 
 class CoachMessageRequest(BaseModel):
     message: str
+    client_time: Optional[datetime] = None
+    time_zone: str = Field(default="", max_length=64)
+
+
+class DailyReviewRequest(BaseModel):
+    routine_status: str
+    notes: str = Field(default="", max_length=500)
     client_time: Optional[datetime] = None
     time_zone: str = Field(default="", max_length=64)
 
@@ -1047,6 +1054,38 @@ def save_time_entries(
     return {"message": "Routine times saved", "entries": [time_entry_to_dict(entry) for entry in saved]}
 
 
+@app.post("/users/me/daily-review")
+def save_daily_review(
+    data: DailyReviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if data.routine_status not in {"followed", "partly_followed", "not_followed"}:
+        raise HTTPException(status_code=400, detail="Choose whether your routine was followed, partly followed, or not followed")
+    now = user_local_now(data.client_time, data.time_zone)
+    review_day = datetime.combine(now.date(), datetime.min.time())
+    today_tasks = db.query(Task).filter(
+        Task.user_id == current_user.id,
+        Task.scheduled_time >= review_day,
+        Task.scheduled_time < review_day + timedelta(days=1),
+    ).all()
+    review = db.query(DailyReview).filter(
+        DailyReview.user_id == current_user.id,
+        DailyReview.review_date == review_day,
+    ).first()
+    if not review:
+        review = DailyReview(user_id=current_user.id, review_date=review_day, routine_status=data.routine_status)
+        db.add(review)
+    review.routine_status = data.routine_status
+    review.notes = data.notes.strip() or None
+    review.completed_tasks = sum(task.status == "completed" for task in today_tasks)
+    review.skipped_tasks = sum(task.status == "skipped" for task in today_tasks)
+    review.rescheduled_tasks = sum(task.rescheduled_time is not None for task in today_tasks)
+    review.recorded_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Daily wrap-up saved. Orbit will use it in future recommendations."}
+
+
 # ============================================================
 # AI COACH
 # ============================================================
@@ -1342,6 +1381,12 @@ def build_orbit_prompt(
         .order_by(DynamicUserData.recorded_at.desc())
         .first()
     )
+    latest_review = (
+        db.query(DailyReview)
+        .filter(DailyReview.user_id == current_user.id)
+        .order_by(DailyReview.review_date.desc())
+        .first()
+    )
 
     planned = "\n".join(
         f"- {task.title} | {task.priority} priority | planned {format_orbit_datetime(task.scheduled_time)}"
@@ -1375,6 +1420,13 @@ def build_orbit_prompt(
         f"stress {daily_data.stress_level:g}/10, mood {daily_data.mood or 'not recorded'}"
         if daily_data else "No wellbeing check-in has been recorded."
     )
+    review_summary = (
+        f"Routine {latest_review.routine_status.replace('_', ' ')}; "
+        f"completed {latest_review.completed_tasks}, skipped {latest_review.skipped_tasks}, "
+        f"rescheduled {latest_review.rescheduled_tasks}. "
+        f"Notes: {latest_review.notes or 'none'}"
+        if latest_review else "No end-of-day review has been recorded yet."
+    )
 
     return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
 
@@ -1404,6 +1456,9 @@ INFERRED CURRENT ROUTINE STATE:
 
 LATEST WELLBEING CHECK-IN:
 {wellbeing}
+
+LATEST END-OF-DAY REVIEW:
+{review_summary}
 
 User question: {question}
 """
@@ -1585,7 +1640,14 @@ def build_orbit_safe_fallback(
     is_workout = is_running or any(word in question_text for word in ("workout", "exercise", "gym"))
     is_reading = any(word in question_text for word in ("read", "novel", "book"))
     is_focus_work = any(word in question_text for word in ("study", "coding", "code", "project", "assignment", "deep work"))
-    duration = 30 if is_reading or is_running else 45 if is_focus_work else 25
+    duration_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr|minutes?|mins?|min)\b", question_text)
+    if duration_match:
+        requested_amount = float(duration_match.group(1))
+        duration = round(requested_amount * 60) if re.search(r"\b(hours?|hrs?|hr)\b", duration_match.group(0)) else round(requested_amount)
+    else:
+        duration = 30 if is_reading or is_running else 45 if is_focus_work else 25
+    duration = max(15, min(duration, 8 * 60))
+    explicitly_today = "today" in question_text
     day_end = datetime.combine(now.date(), datetime.max.time()).replace(hour=23, minute=30, second=0, microsecond=0)
     busy_windows = []
     for entry in db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id).all():
@@ -1632,7 +1694,7 @@ def build_orbit_safe_fallback(
         if not preferred_slots:
             tomorrow = now.date() + timedelta(days=1)
             preferred_slots = [datetime.combine(tomorrow, datetime.min.time()).replace(hour=6, minute=30)]
-    elif is_focus_work and now.hour >= 15:
+    elif is_focus_work and now.hour >= 15 and not explicitly_today:
         # Avoid late-afternoon deep work after a full day; prefer tomorrow's
         # first focus window instead of inventing a past morning slot.
         tomorrow = now.date() + timedelta(days=1)
@@ -1655,6 +1717,20 @@ def build_orbit_safe_fallback(
                 f"Plan to {activity} {day_label} at {slot.strftime('%I:%M %p').lstrip('0')} for {duration} minutes. "
                 "That is a future, activity-appropriate free window that avoids the routine and task times you saved."
             )
+    if explicitly_today:
+        remaining_busy = sorted((start, end) for start, end in busy_windows if end > now)
+        cursor = slot
+        largest_free = timedelta(0)
+        for start, end in remaining_busy + [(day_end, day_end)]:
+            if start > cursor:
+                largest_free = max(largest_free, start - cursor)
+            cursor = max(cursor, end)
+        return (
+            f"It is {now.strftime('%I:%M %p').lstrip('0')} now. {wellbeing_status} "
+            f"I cannot find one uninterrupted {duration}-minute window left today after protecting your saved tasks and routine. "
+            f"The largest remaining gap is about {max(0, round(largest_free.total_seconds() / 60))} minutes. "
+            "You could split the work into two focused blocks today, or move the full session to tomorrow morning."
+        )
     return (
         "I can see that the rest of today is too tight around your saved commitments. "
         "Plan a 30-minute session tomorrow, and I’ll help you choose a specific window once tomorrow’s routine is saved."
