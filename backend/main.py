@@ -1719,13 +1719,13 @@ def build_orbit_safe_fallback(
     for entry in db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id).all():
         if entry.occurred_at.date() == now.date():
             busy_windows.append((entry.occurred_at - timedelta(minutes=30), entry.occurred_at + timedelta(minutes=30)))
-    for task in db.query(Task).filter(
+    today_tasks = [task for task in db.query(Task).filter(
         Task.user_id == current_user.id,
         Task.status.notin_(["completed", "skipped"]),
-    ).all():
-        if task.scheduled_time.date() == now.date():
-            task_end = task.expected_end_time or (task.scheduled_time + timedelta(minutes=task.duration_minutes or 30))
-            busy_windows.append((task.scheduled_time, task_end))
+    ).all() if task.scheduled_time.date() == now.date()]
+    for task in today_tasks:
+        task_end = task.expected_end_time or (task.scheduled_time + timedelta(minutes=task.duration_minutes or 30))
+        busy_windows.append((task.scheduled_time, task_end))
 
     inferred_state = infer_today_state(current_user, db, now)
     wellbeing_status = (
@@ -1736,7 +1736,7 @@ def build_orbit_safe_fallback(
         inferred_state["sleep"] is not None and inferred_state["sleep"] < 6
     ):
         return (
-            "Your latest check-in suggests recovery first, so I would not schedule a demanding session right now. "
+            "Today’s routine and workload suggest recovery first, so I would not schedule a demanding session right now. "
             "Take a short walk, hydrate, or choose a light activity, then reassess your energy before planning exercise."
         )
 
