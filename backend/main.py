@@ -1372,9 +1372,35 @@ def ask_orbit_ai(prompt: str) -> str:
 
     # Render users commonly copy the REST resource name ("models/..."), while
     # this endpoint builds that path segment itself. Support both forms.
-    model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip().removeprefix("models/")
+    preferred_model = os.getenv("ORBIT_AI_MODEL", "gemini-2.5-flash").strip().removeprefix("models/")
+    model = preferred_model
     if not model or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_" for character in model):
         raise HTTPException(status_code=503, detail="ORBIT_AI_MODEL must be a Gemini model ID, for example gemini-2.5-flash.")
+
+    # Model availability can differ by API key, account, and rollout. Ask
+    # Gemini which models this exact key can generate with, then choose a
+    # current Flash model rather than failing just because an alias changed.
+    try:
+        models_request = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            method="GET",
+        )
+        with urllib.request.urlopen(models_request, timeout=12) as models_response:
+            available_models = json.loads(models_response.read().decode("utf-8")).get("models", [])
+        generative_models = {
+            item.get("name", "").removeprefix("models/")
+            for item in available_models
+            if "generateContent" in item.get("supportedGenerationMethods", [])
+        }
+        for candidate in (preferred_model, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"):
+            if candidate in generative_models:
+                model = candidate
+                break
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        # The generation call below gives the user the final actionable error.
+        print(f"Orbit AI model discovery failed; using configured model: {error}")
+
+    print(f"Orbit AI using Gemini model: {model}")
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.55, "maxOutputTokens": 350},
