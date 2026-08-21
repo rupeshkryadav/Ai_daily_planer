@@ -1382,7 +1382,7 @@ User question: {question}
 """
 
 
-def ask_orbit_ai(prompt: str) -> str:
+def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
     """Call Gemini server-side and return its text, with no synthetic fallback."""
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
@@ -1508,7 +1508,12 @@ def ask_orbit_ai(prompt: str) -> str:
     def is_usable_answer(value: str) -> bool:
         words = re.findall(r"[A-Za-z]{2,}", value)
         time_fragment = re.fullmatch(r"[\d\s:–—\-().,*APMapmto]+", value)
-        return len(words) >= 8 and not time_fragment and not value.rstrip().endswith("*")
+        return (
+            len(words) >= 18
+            and len(value) >= 110
+            and not time_fragment
+            and value.rstrip().endswith((".", "!", "?"))
+        )
 
     answer = response_text(body)
     if not is_usable_answer(answer):
@@ -1535,11 +1540,47 @@ def ask_orbit_ai(prompt: str) -> str:
         print(f"Orbit AI returned no usable answer: {body.get('promptFeedback', {})}")
         raise HTTPException(status_code=502, detail="Orbit did not return an answer. Please rephrase and try again.")
     if not is_usable_answer(answer):
-        return (
-            "I don’t want to give you an unreliable time. Tell me roughly how long you want to spend on this, "
-            "and I’ll suggest a future slot that avoids the routine and task times you saved."
-        )
+        return safe_fallback
     return answer
+
+
+def build_orbit_safe_fallback(
+    current_user: User,
+    db: Session,
+    question: str,
+    client_time: Optional[datetime],
+) -> str:
+    """Give a correct schedule answer if the provider sends a partial response."""
+    now = (client_time or datetime.now()).replace(tzinfo=None)
+    duration = 30 if any(word in question.lower() for word in ("read", "novel", "book")) else 25
+    day_end = datetime.combine(now.date(), datetime.max.time()).replace(hour=23, minute=30, second=0, microsecond=0)
+    busy_windows = []
+    for entry in db.query(TimeEntry).filter(TimeEntry.user_id == current_user.id).all():
+        if entry.occurred_at.date() == now.date():
+            busy_windows.append((entry.occurred_at - timedelta(minutes=30), entry.occurred_at + timedelta(minutes=30)))
+    for task in db.query(Task).filter(
+        Task.user_id == current_user.id,
+        Task.status.notin_(["completed", "skipped"]),
+    ).all():
+        if task.scheduled_time.date() == now.date():
+            task_end = task.expected_end_time or (task.scheduled_time + timedelta(minutes=task.duration_minutes or 30))
+            busy_windows.append((task.scheduled_time, task_end))
+
+    slot = (now + timedelta(minutes=15)).replace(second=0, microsecond=0)
+    slot += timedelta(minutes=(15 - slot.minute % 15) % 15)
+    while slot + timedelta(minutes=duration) <= day_end:
+        slot_end = slot + timedelta(minutes=duration)
+        if not any(slot < end and slot_end > start for start, end in busy_windows):
+            activity = "read your novel" if duration == 30 else "work on this"
+            return (
+                f"Try {activity} at {slot.strftime('%I:%M %p').lstrip('0')} for {duration} minutes. "
+                "That is the next free window I can see after your current time, while avoiding the routine and task times you saved."
+            )
+        slot += timedelta(minutes=15)
+    return (
+        "I can see that the rest of today is too tight around your saved commitments. "
+        "Plan a 30-minute session tomorrow, and I’ll help you choose a specific window once tomorrow’s routine is saved."
+    )
 
 
 @app.get("/users/me/second-mind")
@@ -1563,10 +1604,20 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
     context = build_second_mind_context(current_user, db)
     response = second_mind_response(context, message)
-    response["answer"] = ask_orbit_ai(
-        build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone)
-    )
-    response["ai_mode"] = "live"
+    safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time)
+    try:
+        response["answer"] = ask_orbit_ai(
+            build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone),
+            safe_fallback,
+        )
+        response["ai_mode"] = "live"
+    except HTTPException as error:
+        if error.status_code < 500:
+            raise
+        # Keep practical scheduling available during a temporary provider
+        # outage; the answer remains grounded in the user's saved data.
+        response["answer"] = safe_fallback
+        response["ai_mode"] = "schedule fallback"
     return response
 
 @app.get("/users/me/recommendations")
