@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import os
@@ -259,6 +259,7 @@ def get_current_user(
 # ============================================================
 
 class SignupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str
 
@@ -297,6 +298,18 @@ class DynamicDataRequest(BaseModel):
     mood: Optional[str] = None
     energy_level: float = 0
     stress_level: float = 0
+
+
+class OnboardingRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    date_of_birth: Optional[datetime] = None
+    use_case: str = Field(default="student", max_length=50)
+    study_hours: float = Field(default=0, ge=0, le=24)
+    work_hours: float = Field(default=0, ge=0, le=24)
+    sleep_hours: float = Field(default=0, ge=0, le=24)
+    energy_level: float = Field(default=5, ge=1, le=10)
+    routine_date: date
+    routine_times: dict[str, str] = Field(default_factory=dict)
 
 
 class TaskCreateRequest(BaseModel):
@@ -395,6 +408,7 @@ def signup(
         email=final_email,
         username=final_email,
         password_hash=hash_password(final_password),
+        name=data.name.strip() if data else None,
     )
 
     db.add(user)
@@ -405,6 +419,9 @@ def signup(
         "message": "Account created successfully",
         "user_id": user.id,
         "email": user.email,
+        # New accounts go straight into the required onboarding wizard.
+        "access_token": create_token(user.id),
+        "token_type": "bearer",
     }
 
 
@@ -541,8 +558,11 @@ def update_profile(
     if data.preferred_task_difficulty is not None:
         current_user.preferred_task_difficulty = data.preferred_task_difficulty
 
-    if data.onboarding_complete is not None:
-        current_user.onboarding_complete = data.onboarding_complete
+    if data.onboarding_complete is True:
+        raise HTTPException(
+            status_code=400,
+            detail="Complete the required onboarding flow to activate your workspace",
+        )
 
     db.commit()
     db.refresh(current_user)
@@ -565,6 +585,52 @@ def update_profile(
             "onboarding_complete": current_user.onboarding_complete,
         },
     }
+
+
+@app.post("/users/me/onboarding")
+def complete_onboarding(
+    data: OnboardingRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Persist the initial profile, check-in, and selected routine as one flow."""
+    allowed_activities = {
+        "wake_up", "work_start", "lunch", "study", "exercise", "dinner",
+        "wind_down", "sleep", "breakfast", "commute", "chores",
+        "entertainment", "social_time",
+    }
+    current_user.name = data.name.strip()
+    current_user.date_of_birth = data.date_of_birth
+    current_user.use_case = data.use_case
+
+    for activity, time_value in data.routine_times.items():
+        if activity not in allowed_activities:
+            raise HTTPException(status_code=400, detail=f"Unknown routine activity: {activity}")
+        try:
+            occurred_at = datetime.strptime(
+                f"{data.routine_date.isoformat()} {time_value}", "%Y-%m-%d %H:%M"
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Routine times must use HH:MM format")
+        existing = db.query(TimeEntry).filter(
+            TimeEntry.user_id == current_user.id,
+            TimeEntry.activity == activity,
+            TimeEntry.occurred_at == occurred_at,
+        ).first()
+        if not existing:
+            db.add(TimeEntry(user_id=current_user.id, activity=activity, occurred_at=occurred_at))
+
+    db.add(DynamicUserData(
+        user_id=current_user.id,
+        study_hours=data.study_hours,
+        work_hours=data.work_hours,
+        sleep_hours=data.sleep_hours,
+        energy_level=data.energy_level,
+    ))
+    current_user.onboarding_complete = True
+    db.commit()
+    db.refresh(current_user)
+    return {"message": "Onboarding complete", "user": get_me(current_user)}
 
 
 # ============================================================

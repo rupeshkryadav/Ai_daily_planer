@@ -22,8 +22,8 @@ const dateOnly = (value) => value ? String(value).slice(0, 10) : "";
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("token") || "");
   const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState("login");
-  const [credentials, setCredentials] = useState({ email: "", password: "" });
+  const [authMode, setAuthMode] = useState(() => window.location.pathname === "/signup" ? "signup" : "login");
+  const [credentials, setCredentials] = useState({ name: "", email: "", password: "" });
   const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(false);
   const [tasks, setTasks] = useState([]);
@@ -49,6 +49,7 @@ function App() {
   const [dailyCheckIn, setDailyCheckIn] = useState(null);
   const [routineDate, setRoutineDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [routineTimes, setRoutineTimes] = useState({ wake_up: "", breakfast: "", commute: "", work_start: "", lunch: "", study: "", exercise: "", chores: "", dinner: "", entertainment: "", social_time: "", wind_down: "", sleep: "" });
+  const [onboardingActivities, setOnboardingActivities] = useState({ wake_up: true, work_start: true, sleep: true, exercise: false, study: false, lunch: false, dinner: false });
   const [routineLoading, setRoutineLoading] = useState(false);
   const [scheduleAdvice, setScheduleAdvice] = useState(null);
   const [wrapUpOpen, setWrapUpOpen] = useState(false);
@@ -68,9 +69,20 @@ function App() {
   };
 
   useEffect(() => { requestNotifications(); }, []);
+  useEffect(() => {
+    const syncAuthScreen = () => setAuthMode(window.location.pathname === "/signup" ? "signup" : "login");
+    window.addEventListener("popstate", syncAuthScreen);
+    return () => window.removeEventListener("popstate", syncAuthScreen);
+  }, []);
+  useEffect(() => {
+    if (!token && !["/login", "/signup"].includes(window.location.pathname)) {
+      window.history.replaceState({}, "", "/login");
+    }
+  }, [token]);
   useEffect(() => { localStorage.setItem("ai_app_muted", String(muted)); }, [muted]);
   useEffect(() => {
     if (!user) return;
+    setProfileForm((previous) => ({ ...previous, name: previous.name || user.name || "", date_of_birth: previous.date_of_birth || dateOnly(user.date_of_birth) }));
     setAccountForm({
       name: user.name || "",
       age: user.age ?? "",
@@ -239,15 +251,19 @@ function App() {
     setLoading(true);
     try {
       if (authMode === "signup") {
-        await axios.post(`${API_BASE}/signup`, credentials);
-        setAuthMode("login");
-        setNotice("Account created. Please log in to continue.");
+        const result = await axios.post(`${API_BASE}/signup`, credentials);
+        const accessToken = result.data.access_token;
+        if (!accessToken) throw new Error("The server did not return an onboarding session.");
+        localStorage.setItem("token", accessToken);
+        window.history.replaceState({}, "", "/onboarding");
+        setToken(accessToken);
         return;
       }
       const result = await axios.post(`${API_BASE}/login`, credentials);
       const accessToken = result.data.access_token;
       if (!accessToken) throw new Error("The server did not return a session token.");
       localStorage.setItem("token", accessToken);
+      window.history.replaceState({}, "", "/dashboard");
       setToken(accessToken);
     } catch (error) {
       setAuthError(error.response?.data?.detail || error.message || "Unable to sign in. Check your details and try again.");
@@ -262,6 +278,8 @@ function App() {
     setUser(null);
     setTasks([]);
     setPage("dashboard");
+    window.history.replaceState({}, "", "/login");
+    setAuthMode("login");
   };
 
   const scheduleNativeNotifications = async (task) => {
@@ -352,19 +370,24 @@ function App() {
   const completeOnboarding = async () => {
     setLoading(true);
     try {
-      const profile = await axios.put(`${API_BASE}/users/me`, {
+      const selectedRoutineTimes = Object.fromEntries(Object.entries(onboardingActivities)
+        .filter(([, selected]) => selected)
+        .map(([activity]) => [activity, routineTimes[activity]]));
+      if (Object.values(selectedRoutineTimes).some((time) => !time)) {
+        setNotice("Choose a time for each routine activity you selected.");
+        return;
+      }
+      const profile = await axios.post(`${API_BASE}/users/me/onboarding`, {
         name: profileForm.name,
-        gender: profileForm.gender || null,
         date_of_birth: profileForm.date_of_birth ? `${profileForm.date_of_birth}T00:00:00Z` : null,
         use_case: profileForm.use_case,
-        daily_free_hours: profileForm.daily_free_hours === "" ? null : Number(profileForm.daily_free_hours),
-        onboarding_complete: true,
-      }, headers);
-      await axios.post(`${API_BASE}/users/me/dynamic-data`, {
         study_hours: Number(profileForm.study_hours || 0), work_hours: Number(profileForm.work_hours || 0),
-        sleep_hours: Number(profileForm.sleep_hours || 0), stress_level: Number(profileForm.stress_level || 0), energy_level: Number(profileForm.energy_level || 0),
+        sleep_hours: Number(profileForm.sleep_hours || 0), energy_level: Number(profileForm.energy_level || 5),
+        routine_date: routineDate, routine_times: selectedRoutineTimes,
       }, headers);
       setUser(profile.data.user);
+      setPage("dashboard");
+      window.history.replaceState({}, "", "/dashboard");
       setNotice("Your workspace is ready. Your coaching will now adapt to your profile and check-ins.");
     } catch (error) { setNotice(error.response?.data?.detail || "We could not save your onboarding answers. Please try again."); }
     finally { setLoading(false); }
@@ -401,13 +424,13 @@ function App() {
   if (!token) return (
     <main className="auth-shell">
       <section className="auth-hero"><span className="brand-mark">◈</span><p className="eyebrow">YOUR PERSONAL OPERATING SYSTEM</p><h1>Make room for what matters.</h1><p>Plan focused days, learn from your routine, and build a life that feels intentional.</p><div className="hero-points"><span>✓ Private account history</span><span>✓ Adaptive coaching</span><span>✓ Thoughtful reminders</span></div></section>
-      <section className="auth-panel"><div className="auth-card"><div className="brand">orbit<span>day</span></div><h2>{authMode === "login" ? "Welcome back" : "Create your space"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : "Your account keeps your plans and insights together."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}<form onSubmit={handleAuth}><label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Create account"}</button></form><button className="text-button" onClick={() => { setAuthMode(authMode === "login" ? "signup" : "login"); setAuthError(""); setNotice(""); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
+      <section className="auth-panel"><div className="auth-card"><div className="brand">orbit<span>day</span></div><h2>{authMode === "login" ? "Welcome back" : "Create your space"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : "Start with the essentials, then we’ll set up your routine."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}<form onSubmit={handleAuth}>{authMode === "signup" && <label>Your name<input value={credentials.name} onChange={(e) => setCredentials({ ...credentials, name: e.target.value })} placeholder="What should we call you?" required autoFocus /></label>}<label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required autoFocus={authMode === "login"} /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Continue to setup"}</button></form><button className="text-button" onClick={() => { const nextMode = authMode === "login" ? "signup" : "login"; window.history.pushState({}, "", `/${nextMode}`); setAuthMode(nextMode); setAuthError(""); setNotice(""); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
     </main>
   );
 
   if (user && !user.onboarding_complete) {
     const roleQuestion = profileForm.use_case === "student" ? "How many hours do you study on a typical day?" : "How many hours do you work on a typical day?";
-    return <main className="onboarding-shell"><section className="onboarding-card"><div className="brand">orbit<span>day</span></div><div className="progress"><i style={{ width: `${((onboardingStep + 1) / 3) * 100}%` }} /></div><p className="eyebrow">A FEW QUICK QUESTIONS · {onboardingStep + 1} OF 3</p>{onboardingStep === 0 && <><h1>Let’s make this feel personal.</h1><p>We’ll use this only to tailor your daily workspace.</p><label>Your name<input autoFocus value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} placeholder="What should we call you?" /></label><label>Date of birth <span>(optional)</span><input type="date" value={profileForm.date_of_birth} onChange={(e) => setProfileForm({ ...profileForm, date_of_birth: e.target.value })} /></label></>}{onboardingStep === 1 && <><h1>What does your day revolve around?</h1><p>Your answer shapes the language and suggestions you see.</p><div className="role-options">{[["student", "I’m studying", "Plan learning and revision"], ["professional", "I’m working", "Protect focused work time"], ["personal", "Personal goals", "Build a healthier routine"]].map(([value, title, copy]) => <button key={value} className={profileForm.use_case === value ? "selected" : ""} onClick={() => setProfileForm({ ...profileForm, use_case: value })}><b>{title}</b><small>{copy}</small></button>)}</div></>}{onboardingStep === 2 && <><h1>One last check-in.</h1><p>This gives your first coaching suggestion a useful starting point.</p><label>{roleQuestion}<input type="number" min="0" max="24" value={profileForm.use_case === "student" ? profileForm.study_hours : profileForm.work_hours} onChange={(e) => setProfileForm({ ...profileForm, [profileForm.use_case === "student" ? "study_hours" : "work_hours"]: e.target.value })} placeholder="Hours" /></label><div className="two-column"><label>Average sleep<input type="number" min="0" max="24" value={profileForm.sleep_hours} onChange={(e) => setProfileForm({ ...profileForm, sleep_hours: e.target.value })} placeholder="Hours" /></label><label>Energy today (1–10)<input type="number" min="1" max="10" value={profileForm.energy_level} onChange={(e) => setProfileForm({ ...profileForm, energy_level: e.target.value })} /></label></div></>}{onboardingStep < 2 ? <button className="primary-button" disabled={onboardingStep === 0 && !profileForm.name.trim()} onClick={() => setOnboardingStep(onboardingStep + 1)}>Continue</button> : <button className="primary-button" disabled={loading} onClick={completeOnboarding}>{loading ? "Creating your space…" : "Open my workspace"}</button>}</section></main>;
+    return <main className="onboarding-shell"><section className="onboarding-card"><div className="brand">orbit<span>day</span></div><div className="progress"><i style={{ width: `${((onboardingStep + 1) / 4) * 100}%` }} /></div><p className="eyebrow">YOUR INITIAL SETUP · {onboardingStep + 1} OF 4</p>{notice && <div className="notice error">{notice}</div>}{onboardingStep === 0 && <><h1>Let’s make this feel personal.</h1><p>We’ll use this only to tailor your daily workspace.</p><label>Your name<input autoFocus value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} placeholder="What should we call you?" /></label><label>Date of birth <span>(optional)</span><input type="date" value={profileForm.date_of_birth} onChange={(e) => setProfileForm({ ...profileForm, date_of_birth: e.target.value })} /></label></>}{onboardingStep === 1 && <><h1>What does your day revolve around?</h1><p>Your answer shapes the language and suggestions you see.</p><div className="role-options">{[["student", "I’m studying", "Plan learning and revision"], ["professional", "I’m working", "Protect focused work time"], ["personal", "Personal goals", "Build a healthier routine"]].map(([value, title, copy]) => <button key={value} className={profileForm.use_case === value ? "selected" : ""} onClick={() => setProfileForm({ ...profileForm, use_case: value })}><b>{title}</b><small>{copy}</small></button>)}</div></>}{onboardingStep === 2 && <><h1>Set your core routine.</h1><p>Choose the anchors that shape most days. Add optional activities if they matter to your plan.</p><div className="onboarding-routine">{[["wake_up", "Wake up", true], ["work_start", "Work / college starts", true], ["sleep", "Sleep", true], ["exercise", "Exercise", false], ["study", "Study", false], ["lunch", "Lunch", false], ["dinner", "Dinner", false]].map(([key, label, core]) => <div className="onboarding-routine-row" key={key}><button type="button" className={`toggle ${onboardingActivities[key] ? "on" : ""}`} disabled={core} onClick={() => setOnboardingActivities({ ...onboardingActivities, [key]: !onboardingActivities[key] })} aria-label={`Toggle ${label}`}><i /></button><span>{label}{core ? " · core" : ""}</span>{onboardingActivities[key] && <input type="time" value={routineTimes[key]} onChange={(e) => setRoutineTimes({ ...routineTimes, [key]: e.target.value })} required />}</div>)}</div></>}{onboardingStep === 3 && <><h1>One last check-in.</h1><p>This gives your first coaching suggestion a useful starting point.</p><label>{roleQuestion}<input type="number" min="0" max="24" value={profileForm.use_case === "student" ? profileForm.study_hours : profileForm.work_hours} onChange={(e) => setProfileForm({ ...profileForm, [profileForm.use_case === "student" ? "study_hours" : "work_hours"]: e.target.value })} placeholder="Hours" /></label><div className="two-column"><label>Average sleep<input type="number" min="0" max="24" value={profileForm.sleep_hours} onChange={(e) => setProfileForm({ ...profileForm, sleep_hours: e.target.value })} placeholder="Hours" /></label><label>Energy today (1–10)<input type="number" min="1" max="10" value={profileForm.energy_level} onChange={(e) => setProfileForm({ ...profileForm, energy_level: e.target.value })} /></label></div></>}{onboardingStep < 3 ? <button className="primary-button" disabled={onboardingStep === 0 && !profileForm.name.trim()} onClick={() => { setNotice(""); setOnboardingStep(onboardingStep + 1); }}>Continue</button> : <button className="primary-button" disabled={loading} onClick={completeOnboarding}>{loading ? "Creating your space…" : "Open my workspace"}</button>}</section></main>;
   }
 
   const nav = [["dashboard", "Overview", "⌂"], ["schedule", "Plan", "+"], ["routine", "Routine", "◔"], ["coach", "Ask Orbit", "✦"], ["history", "History", "◷"], ["settings", "Settings", "⚙"]];
