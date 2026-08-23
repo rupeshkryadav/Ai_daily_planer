@@ -22,13 +22,15 @@ const dateOnly = (value) => value ? String(value).slice(0, 10) : "";
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("token") || "");
   const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState(() => window.location.pathname === "/signup" ? "signup" : "login");
+  const [authMode, setAuthMode] = useState(() => window.location.pathname === "/signup" ? "signup" : window.location.pathname === "/reset-password" ? "reset" : "login");
   const [credentials, setCredentials] = useState({ name: "", email: "", password: "" });
+  const [resetForm, setResetForm] = useState(() => ({ email: "", token: new URLSearchParams(window.location.search).get("token") || "", newPassword: "" }));
+  const [resetRequested, setResetRequested] = useState(() => Boolean(new URLSearchParams(window.location.search).get("token")));
   const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(false);
   const [tasks, setTasks] = useState([]);
   const [page, setPage] = useState("dashboard");
-  const [form, setForm] = useState({ title: "", start: "", end: "", durationHours: "", durationMinutes: "", priority: "medium" });
+  const [form, setForm] = useState({ title: "", start: "", end: "", durationHours: "", durationMinutes: "", priority: "medium", taskDifficulty: "" });
   const [selectedTask, setSelectedTask] = useState(null);
   const [response, setResponse] = useState("completed");
   const [rescheduleTime, setRescheduleTime] = useState("");
@@ -70,12 +72,16 @@ function App() {
 
   useEffect(() => { requestNotifications(); }, []);
   useEffect(() => {
-    const syncAuthScreen = () => setAuthMode(window.location.pathname === "/signup" ? "signup" : "login");
+    const syncAuthScreen = () => {
+      setAuthMode(window.location.pathname === "/signup" ? "signup" : window.location.pathname === "/reset-password" ? "reset" : "login");
+      const linkedToken = new URLSearchParams(window.location.search).get("token");
+      if (linkedToken) { setResetForm((previous) => ({ ...previous, token: linkedToken })); setResetRequested(true); }
+    };
     window.addEventListener("popstate", syncAuthScreen);
     return () => window.removeEventListener("popstate", syncAuthScreen);
   }, []);
   useEffect(() => {
-    if (!token && !["/login", "/signup"].includes(window.location.pathname)) {
+    if (!token && !["/login", "/signup", "/reset-password"].includes(window.location.pathname)) {
       window.history.replaceState({}, "", "/login");
     }
   }, [token]);
@@ -126,7 +132,7 @@ function App() {
       try {
         const result = await axios.post(`${API_BASE}/tasks/schedule-advice`, {
           title: form.title, start_time: start.toISOString(), end_time: end.toISOString(),
-          duration_minutes: durationMinutes, priority: form.priority,
+          duration_minutes: durationMinutes, priority: form.priority, task_difficulty: form.taskDifficulty || null,
         }, { headers: { Authorization: `Bearer ${token}` } });
         setScheduleAdvice(result.data);
       } catch {
@@ -134,7 +140,7 @@ function App() {
       }
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [page, token, form.title, form.start, form.end, form.durationHours, form.durationMinutes, form.priority]);
+  }, [page, token, form.title, form.start, form.end, form.durationHours, form.durationMinutes, form.priority, form.taskDifficulty]);
 
   useEffect(() => {
     if (!user || !tasks.length || new Date().getHours() < 20) return;
@@ -167,14 +173,16 @@ function App() {
   };
 
   const loadCoaching = async () => {
-    const [coachResult, recommendationResult, secondMindResult] = await Promise.all([
+    const [coachResult, recommendationResult, secondMindResult, messagesResult] = await Promise.all([
       axios.get(`${API_BASE}/users/me/ai-coach`, headers),
       axios.get(`${API_BASE}/users/me/recommendations`, headers),
       axios.get(`${API_BASE}/users/me/second-mind`, headers),
+      axios.get(`${API_BASE}/users/me/coach/messages`, headers),
     ]);
     setCoach(coachResult.data.tip || "Schedule your first task to start receiving coaching.");
     setInsight(recommendationResult.data.adaptive_plan || recommendationResult.data.recommendation || "Your next personalized plan will appear here.");
     setSecondMind(secondMindResult.data);
+    setCoachMessages(Array.isArray(messagesResult.data) ? messagesResult.data : []);
   };
 
   const loadDailyCheckIn = async () => {
@@ -272,6 +280,29 @@ function App() {
     }
   };
 
+  const handlePasswordReset = async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    setLoading(true);
+    try {
+      if (!resetRequested) {
+        const result = await axios.post(`${API_BASE}/password-reset/request`, { email: resetForm.email });
+        if (result.data.reset_token) setResetForm((previous) => ({ ...previous, token: result.data.reset_token }));
+        setResetRequested(true);
+        setNotice(result.data.reset_token ? "A development reset link was created. Choose a new password below." : result.data.message);
+      } else {
+        await axios.post(`${API_BASE}/password-reset/confirm`, { token: resetForm.token, new_password: resetForm.newPassword });
+        setNotice("Password reset. Sign in with your new password.");
+        window.history.replaceState({}, "", "/login");
+        setAuthMode("login");
+        setResetRequested(false);
+        setResetForm({ email: "", token: "", newPassword: "" });
+      }
+    } catch (error) {
+      setAuthError(error.response?.data?.detail || "We could not complete the password reset. Please try again.");
+    } finally { setLoading(false); }
+  };
+
   const logout = () => {
     localStorage.removeItem("token");
     setToken("");
@@ -301,11 +332,11 @@ function App() {
     if (endWindow <= start) return setNotice("The deadline must be after the start window.");
     if (start.getTime() + durationMinutes * 60000 > endWindow.getTime()) return setNotice("The estimated duration must fit before the deadline.");
     try {
-      const result = await axios.post(`${API_BASE}/tasks/`, { title: form.title, start_time: start.toISOString(), end_time: endWindow.toISOString(), duration_minutes: durationMinutes, priority: form.priority }, headers);
+      const result = await axios.post(`${API_BASE}/tasks/`, { title: form.title, start_time: start.toISOString(), end_time: endWindow.toISOString(), duration_minutes: durationMinutes, priority: form.priority, task_difficulty: form.taskDifficulty || null }, headers);
       const task = result.data;
       setTasks((previous) => [task, ...previous]);
       scheduleNativeNotifications(task);
-      setForm({ title: "", start: "", end: "", durationHours: "", durationMinutes: "", priority: "medium" });
+      setForm({ title: "", start: "", end: "", durationHours: "", durationMinutes: "", priority: "medium", taskDifficulty: "" });
       setNotice("Task scheduled and saved to your account.");
       setPage("dashboard");
     } catch (error) {
@@ -363,7 +394,7 @@ function App() {
 
   const applyPreset = (title, minutes) => {
     const start = new Date();
-    setForm({ title, start: dateTimeLocal(start), end: dateTimeLocal(new Date(start.getTime() + (minutes * 2) * 60000)), durationHours: String(Math.floor(minutes / 60)), durationMinutes: String(minutes % 60), priority: "medium" });
+    setForm({ title, start: dateTimeLocal(start), end: dateTimeLocal(new Date(start.getTime() + (minutes * 2) * 60000)), durationHours: String(Math.floor(minutes / 60)), durationMinutes: String(minutes % 60), priority: "medium", taskDifficulty: "" });
     setPage("schedule");
   };
 
@@ -424,7 +455,7 @@ function App() {
   if (!token) return (
     <main className="auth-shell">
       <section className="auth-hero"><span className="brand-mark">◈</span><p className="eyebrow">YOUR PERSONAL OPERATING SYSTEM</p><h1>Make room for what matters.</h1><p>Plan focused days, learn from your routine, and build a life that feels intentional.</p><div className="hero-points"><span>✓ Private account history</span><span>✓ Adaptive coaching</span><span>✓ Thoughtful reminders</span></div></section>
-      <section className="auth-panel"><div className="auth-card"><div className="brand">orbit<span>day</span></div><h2>{authMode === "login" ? "Welcome back" : "Create your space"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : "Start with the essentials, then we’ll set up your routine."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}<form onSubmit={handleAuth}>{authMode === "signup" && <label>Your name<input value={credentials.name} onChange={(e) => setCredentials({ ...credentials, name: e.target.value })} placeholder="What should we call you?" required autoFocus /></label>}<label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required autoFocus={authMode === "login"} /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Continue to setup"}</button></form><button className="text-button" onClick={() => { const nextMode = authMode === "login" ? "signup" : "login"; window.history.pushState({}, "", `/${nextMode}`); setAuthMode(nextMode); setAuthError(""); setNotice(""); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
+      <section className="auth-panel"><div className="auth-card"><div className="brand">orbit<span>day</span></div><h2>{authMode === "login" ? "Welcome back" : authMode === "signup" ? "Create your space" : "Reset your password"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : authMode === "signup" ? "Start with the essentials, then we’ll set up your routine." : resetRequested ? "Choose a new password for your account." : "We’ll email a secure reset link to your account."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}{authMode === "reset" ? <form onSubmit={handlePasswordReset}>{!resetRequested ? <label>Email address<input type="email" value={resetForm.email} onChange={(e) => setResetForm({ ...resetForm, email: e.target.value })} placeholder="you@example.com" required autoFocus /></label> : <><label>Reset token<input value={resetForm.token} onChange={(e) => setResetForm({ ...resetForm, token: e.target.value })} placeholder="Paste the token from your reset email" required /></label><label>New password<input type="password" minLength="8" value={resetForm.newPassword} onChange={(e) => setResetForm({ ...resetForm, newPassword: e.target.value })} placeholder="At least 8 characters" required autoFocus /></label></>}<button className="primary-button" disabled={loading}>{loading ? "Please wait…" : resetRequested ? "Save new password" : "Send reset link"}</button></form> : <form onSubmit={handleAuth}>{authMode === "signup" && <label>Your name<input value={credentials.name} onChange={(e) => setCredentials({ ...credentials, name: e.target.value })} placeholder="What should we call you?" required autoFocus /></label>}<label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required autoFocus={authMode === "login"} /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Continue to setup"}</button></form>}{authMode === "login" && <button className="text-button" onClick={() => { window.history.pushState({}, "", "/reset-password"); setAuthMode("reset"); setAuthError(""); setNotice(""); }}>Forgot password?</button>}<button className="text-button" onClick={() => { const nextMode = authMode === "login" ? "signup" : "login"; window.history.pushState({}, "", `/${nextMode}`); setAuthMode(nextMode); setAuthError(""); setNotice(""); setResetRequested(false); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
     </main>
   );
 
@@ -438,7 +469,7 @@ function App() {
     <aside className="sidebar"><button className="brand brand-button" onClick={() => setPage("dashboard")} aria-label="Go to dashboard">orbit<span>day</span></button><p className="workspace-label">PERSONAL WORKSPACE</p><nav>{nav.map(([key, label, icon]) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => { setPage(key); if (key === "routine") loadRoutine(); }}><span>{icon}</span>{label}</button>)}</nav><div className="sidebar-bottom"><button className="user-chip" onClick={() => setPage("settings")} title="Open profile"><div>{(user?.name || user?.email || "U")[0].toUpperCase()}</div><span>{user?.name || user?.email}</span></button><button className="nav-item logout" onClick={logout}><span>↪</span>Log out</button></div></aside>
     <main className="workspace"><header className="topbar"><div><p className="eyebrow">{page === "dashboard" ? "GOOD TO SEE YOU" : "YOUR PERSONAL SPACE"}</p><h1>{page === "dashboard" ? `Hello${user?.name ? `, ${user.name}` : ""}.` : page[0].toUpperCase() + page.slice(1)}</h1></div><div className="topbar-actions"><button className="secondary-button" onClick={() => setWrapUpOpen(true)}>Wrap up day</button><button className="notification-toggle" onClick={() => setMuted(!muted)}>{muted ? "Notifications off" : "Notifications on"}</button></div></header>{notice && <div className="notice success app-notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       {page === "dashboard" && <><section className="stats-grid"><article><span>ACTIVE PLANS</span><strong>{activeTasks.length}</strong><small>Ready for your attention</small></article><article><span>COMPLETED</span><strong>{completedCount}</strong><small>Tasks in your history</small></article><article><span>FOLLOW-THROUGH</span><strong>{completionRate}%</strong><small>Of logged tasks</small></article></section><section className="content-grid"><article className="panel wide"><div className="panel-heading"><div><p className="eyebrow">NEXT UP</p><h2>Your schedule</h2></div><button className="secondary-button" onClick={() => setPage("schedule")}>Plan a task</button></div>{activeTasks.length ? <div className="task-stack">{activeTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} onClick={() => openTask(task)} />)}</div> : <EmptyState title="A clear day starts with one plan." action="Schedule your first task" onClick={() => setPage("schedule")} />}</article><article className="panel coach-card"><p className="eyebrow">YOUR SECOND MIND</p><h2>Best next move</h2><p>{secondMind?.answer || coach}</p><hr /><p className="insight"><b>{secondMind?.suggested_time ? `Suggested time · ${secondMind.suggested_time}` : "Suggested next step"}</b>{insight}</p>{secondMind?.data_mode === "bootstrap" && <p className="ai-status">Starter guidance · personalized as you add routine and outcomes</p>}{secondMind?.data_mode === "blended" && <p className="ai-status">Learning from your routine · becoming more personal</p>}<button className="secondary-button coach-link" onClick={() => setPage("coach")}>Ask Orbit</button></article></section></>}
-      {page === "schedule" && <section className="plan-layout"><article className="panel schedule-card"><p className="eyebrow">ADD TO YOUR DAY</p><h2>Plan a task window</h2><form className="task-form" onSubmit={createTask}><label>What do you want to do?<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Finish college assignment" required /></label><div className="two-column"><label>Available from<input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} required /></label><label>Deadline / end window<input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} required /></label></div><div className="duration-field"><span>Estimated effort</span><div><input type="number" min="0" max="720" value={form.durationHours} onChange={(e) => setForm({ ...form, durationHours: e.target.value })} placeholder="Hours" aria-label="Duration hours" /><input type="number" min="0" max="59" value={form.durationMinutes} onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })} placeholder="Minutes" aria-label="Duration minutes" /></div><small>Orbit uses this duration to find a free slot inside your available window.</small></div>{scheduleAdvice && <div className={scheduleAdvice.has_conflict ? "schedule-advice warning" : "schedule-advice"}><b>Orbit’s scheduling note</b><span>{scheduleAdvice.message}</span>{scheduleAdvice.has_conflict && scheduleAdvice.suggested_start && <button type="button" className="secondary-button" onClick={() => setForm({ ...form, start: dateTimeLocal(scheduleAdvice.suggested_start) })}>Use {displayDate(scheduleAdvice.suggested_start)}</button>}</div>}<label>Priority<select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}><option value="high">High — do this first if plans overlap</option><option value="medium">Medium — normal priority</option><option value="low">Low — flexible</option></select></label><button className="primary-button">Add to plan</button></form></article><article className="panel"><p className="eyebrow">START FASTER</p><h2>Routine templates</h2><div className="preset-list">{[["Morning workout", 45], ["Deep work session", 90], ["Read and learn", 30], ["Daily reflection", 20]].map(([title, minutes]) => <button key={title} onClick={() => applyPreset(title, minutes)}><span>{title}</span><small>{minutes} min</small></button>)}</div></article></section>}
+      {page === "schedule" && <section className="plan-layout"><article className="panel schedule-card"><p className="eyebrow">ADD TO YOUR DAY</p><h2>Plan a task window</h2><form className="task-form" onSubmit={createTask}><label>What do you want to do?<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Finish college assignment" required /></label><div className="two-column"><label>Available from<input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} required /></label><label>Deadline / end window<input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} required /></label></div><div className="duration-field"><span>Estimated effort</span><div><input type="number" min="0" max="720" value={form.durationHours} onChange={(e) => setForm({ ...form, durationHours: e.target.value })} placeholder="Hours" aria-label="Duration hours" /><input type="number" min="0" max="59" value={form.durationMinutes} onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })} placeholder="Minutes" aria-label="Duration minutes" /></div><small>Orbit uses this duration to find a free slot inside your available window.</small></div>{scheduleAdvice && <div className={scheduleAdvice.has_conflict ? "schedule-advice warning" : "schedule-advice"}><b>Orbit’s scheduling note</b><span>{scheduleAdvice.message}</span>{scheduleAdvice.has_conflict && scheduleAdvice.suggested_start && <button type="button" className="secondary-button" onClick={() => setForm({ ...form, start: dateTimeLocal(scheduleAdvice.suggested_start) })}>Use {displayDate(scheduleAdvice.suggested_start)}</button>}</div>}<div className="two-column"><label>Priority<select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}><option value="high">High — do this first if plans overlap</option><option value="medium">Medium — normal priority</option><option value="low">Low — flexible</option></select></label><label>Difficulty <span>(for Orbit’s estimate)</span><select value={form.taskDifficulty} onChange={(e) => setForm({ ...form, taskDifficulty: e.target.value })}><option value="">Use profile default</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label></div><button className="primary-button">Add to plan</button></form></article><article className="panel"><p className="eyebrow">START FASTER</p><h2>Routine templates</h2><div className="preset-list">{[["Morning workout", 45], ["Deep work session", 90], ["Read and learn", 30], ["Daily reflection", 20]].map(([title, minutes]) => <button key={title} onClick={() => applyPreset(title, minutes)}><span>{title}</span><small>{minutes} min</small></button>)}</div></article></section>}
       {page === "routine" && <section className="routine-layout"><article className="panel"><p className="eyebrow">DAILY TIME CHECK-IN</p><h2>When did your day happen?</h2><p className="muted-copy routine-intro">Only add the main anchors of your day. Orbit treats these as busy times and learns the gaps between them.</p><form className="task-form" onSubmit={saveRoutine}><label>Day<input type="date" value={routineDate} onChange={(e) => changeRoutineDate(e.target.value)} required /></label><div className="routine-grid">{[["wake_up", "Wake up", "☀"], ["work_start", "Start work / college", "▣"], ["lunch", "Lunch", "◐"], ["study", "Study time", "◫"], ["exercise", "Exercise", "✦"], ["dinner", "Dinner", "◑"], ["wind_down", "Wind down", "☾"], ["sleep", "Go to sleep", "◒"]].map(([key, label, icon]) => <label key={key} className="routine-entry"><span className="routine-icon">{icon}</span><span>{label}</span><input type="time" value={routineTimes[key]} onChange={(e) => setRoutineTimes({ ...routineTimes, [key]: e.target.value })} /></label>)}</div><button className="primary-button" disabled={routineLoading}>{routineLoading ? "Saving routine…" : "Save today’s times"}</button></form></article><article className="panel routine-help"><p className="eyebrow">WHY THIS MATTERS</p><h2>Better timing, less effort</h2><p>Orbit needs only your major commitments—not a minute-by-minute diary—to find realistic task slots.</p><p className="muted-copy">Tasks and routine anchors together create the available time that Orbit schedules around.</p></article></section>}
       {page === "coach" && <section className="coach-layout"><article className="panel coach-conversation"><p className="eyebrow">ORBIT, YOUR SECOND MIND</p><h2>Think through your day</h2><p className="muted-copy">Ask about the best time for work, what to do next, or whether you should rest. Orbit reads your saved plan and routine before replying.</p><div className="message-stack"><div className="coach-message assistant">What would you like to think through? I’ll check your saved plan, routine, and recent progress before I answer.</div>{coachMessages.map((message, index) => <div key={index} className={`coach-message ${message.role}`}>{message.text}</div>)}</div><form className="coach-form" onSubmit={askCoach}><input value={coachQuestion} onChange={(e) => setCoachQuestion(e.target.value)} placeholder="e.g. When should I study today?" maxLength="500" /><button className="primary-button" disabled={coachSending}>{coachSending ? "Thinking…" : "Ask Orbit"}</button></form></article><article className="panel coach-facts"><p className="eyebrow">TODAY’S REASONING</p><h2>What Orbit is using</h2><div className="settings-line"><span>Conversation</span><b>{secondMind?.ai_mode === "live" ? "Live AI" : ["schedule fallback", "schedule-aware"].includes(secondMind?.ai_mode) ? "Schedule-aware" : "Ready for a question"}</b></div><div className="settings-line"><span>Suggested focus time</span><b>{secondMind?.suggested_time || "Learning your routine"}</b></div><div className="settings-line"><span>Next-step priority</span><b>{secondMind?.priority || "Medium"}</b></div><div className="settings-line"><span>Guidance source</span><b>{secondMind?.data_mode === "personalized" ? "Your real history" : secondMind?.data_mode === "blended" ? "Real + starter data" : "Starter data"}</b></div><p className="muted-copy">{secondMind?.reason || "Complete a few tasks and save routine times so Orbit can recognize your most useful hours."}</p>{secondMind?.history_progress && <p className="ai-progress">Progress: {secondMind.history_progress.completed_tasks}/{secondMind.history_progress.needed_completed_tasks} completed tasks · {secondMind.history_progress.routine_days}/{secondMind.history_progress.needed_routine_days} routine days</p>}</article></section>}
       {page === "history" && <section className="panel"><div className="panel-heading"><div><p className="eyebrow">SAVED TO YOUR ACCOUNT</p><h2>Activity history</h2></div><span className="count-pill">{historyTasks.length} records</span></div>{historyTasks.length ? <div className="history-table">{historyTasks.map((task) => <div key={task.id} className="history-row"><div><b>{task.title}</b><small>{displayDate(task.scheduled_time)}</small>{task.user_reason && <em>“{task.user_reason}”</em>}</div><span className={`status ${task.status}`}>{task.status}</span></div>)}</div> : <EmptyState title="Completed plans will live here." action="View your schedule" onClick={() => setPage("dashboard")} />}</section>}

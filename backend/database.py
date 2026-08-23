@@ -48,6 +48,11 @@ def migrate_legacy_schema():
         "tasks": {
             "message": "TEXT",
             "priority": "VARCHAR(10) DEFAULT 'medium' NOT NULL",
+            "task_difficulty": "VARCHAR(20)",
+            "predicted_productivity_score": "FLOAT",
+            "predicted_burnout_level": "FLOAT",
+            "predicted_task_priority": "VARCHAR(20)",
+            "predicted_task_completion": "VARCHAR(20)",
             "deadline": "TIMESTAMP",
             "duration_minutes": "INTEGER",
             "rescheduled_time": "TIMESTAMP",

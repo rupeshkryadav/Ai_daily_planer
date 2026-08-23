@@ -5,6 +5,8 @@ import os
 import re
 import urllib.error
 import urllib.request
+import smtplib
+from email.message import EmailMessage
 from dotenv import load_dotenv
 
 # Local development reads backend/.env; production platforms provide the same
@@ -29,7 +31,7 @@ import base64
 import json
 
 from database import engine, Base, get_db, migrate_legacy_schema, SessionLocal
-from models import User, Task, DynamicUserData, TimeEntry, DailyReview
+from models import User, Task, DynamicUserData, TimeEntry, DailyReview, CoachMessage
 from ml_helper import predict_task_insights
 
 
@@ -275,6 +277,15 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=20)
+    new_password: str = Field(min_length=8)
+
+
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     age: Optional[int] = None
@@ -318,7 +329,17 @@ class TaskCreateRequest(BaseModel):
     end_time: datetime
     duration_minutes: int = Field(gt=0, le=60 * 24 * 30)
     priority: str = "medium"
+    task_difficulty: Optional[str] = None
     use_suggested_slot: bool = False
+
+
+class TaskUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_minutes: Optional[int] = Field(default=None, gt=0, le=60 * 24 * 30)
+    priority: Optional[str] = None
+    task_difficulty: Optional[str] = None
 
 
 class TimeEntryInput(BaseModel):
@@ -564,6 +585,93 @@ def update_profile(
             detail="Complete the required onboarding flow to activate your workspace",
         )
 
+
+def create_password_reset_token(user: User) -> str:
+    """Create a short-lived reset token invalidated when the password changes."""
+    payload = {
+        "user_id": user.id,
+        "exp": int((datetime.utcnow() + timedelta(minutes=30)).timestamp()),
+        "password_version": hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16],
+    }
+
+
+@app.post("/password-reset/request")
+def request_password_reset(data: PasswordResetRequest, db: Session = Depends(get_db)):
+    """Send a reset link without revealing whether the email has an account."""
+    user = db.query(User).filter(User.email == data.email.strip().lower()).first()
+    response = {"message": "If an Orbitday account exists for that email, a reset link has been sent."}
+    if not user:
+        return response
+    reset_token = create_password_reset_token(user)
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    reset_url = f"{frontend_url}/reset-password?token={reset_token}"
+    try:
+        delivered = send_password_reset_email(user.email, reset_url)
+    except (OSError, smtplib.SMTPException) as error:
+        print(f"Password-reset email delivery failed: {error}")
+        delivered = False
+    # No SMTP provider is required for local development; production never
+    # exposes the token and instead relies on the configured email service.
+    if not delivered and os.getenv("APP_ENV", "development").lower() != "production":
+        response["reset_token"] = reset_token
+    return response
+
+
+@app.post("/password-reset/confirm")
+def confirm_password_reset(data: PasswordResetConfirmRequest, db: Session = Depends(get_db)):
+    try:
+        encoded = data.token.split(".", 1)[0]
+        payload = json.loads(base64.urlsafe_b64decode(encoded.encode()).decode())
+        user_id = int(payload["user_id"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+    decode_password_reset_token(data.token, user)
+    user.password_hash = hash_password(data.new_password)
+    user.hashed_password = None
+    db.commit()
+    return {"message": "Password reset. You can now sign in with your new password."}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    signature = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def decode_password_reset_token(token: str, user: User) -> None:
+    try:
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
+        payload = json.loads(base64.urlsafe_b64decode(encoded.encode()).decode())
+        valid_version = hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16]
+        if (not hmac.compare_digest(signature, expected) or payload.get("user_id") != user.id
+                or payload.get("password_version") != valid_version
+                or payload.get("exp", 0) < int(datetime.utcnow().timestamp())):
+            raise ValueError("invalid reset token")
+    except Exception:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+
+
+def send_password_reset_email(email: str, reset_url: str) -> bool:
+    """Send through SMTP when configured; development can use the returned link."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    sender = os.getenv("SMTP_FROM", "").strip()
+    if not host or not sender:
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Reset your Orbitday password"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(f"Use this link within 30 minutes to reset your Orbitday password:\n\n{reset_url}")
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=15) as client:
+        if os.getenv("SMTP_STARTTLS", "true").lower() != "false":
+            client.starttls()
+        username, password = os.getenv("SMTP_USERNAME", ""), os.getenv("SMTP_PASSWORD", "")
+        if username:
+            client.login(username, password)
+        client.send_message(message)
+    return True
+
     db.commit()
     db.refresh(current_user)
 
@@ -643,6 +751,89 @@ ROUTINE_BLOCK_MINUTES = {
     "dinner": 45, "entertainment": 90, "social_time": 60,
     "wind_down": 45, "sleep": 480,
 }
+
+
+def normalized_task_difficulty(value: Optional[str], current_user: User) -> str:
+    difficulty = (value or current_user.preferred_task_difficulty or "medium").strip().lower()
+    if difficulty not in {"easy", "medium", "hard"}:
+        raise HTTPException(status_code=400, detail="Task difficulty must be easy, medium, or hard")
+    return difficulty
+
+
+def derived_exercise_minutes(current_user: User, db: Session, target_day: date) -> float:
+    """Estimate exercise from logged routine intervals and actual exercise-task durations."""
+    day_start = datetime.combine(target_day, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+    entries = db.query(TimeEntry).filter(
+        TimeEntry.user_id == current_user.id,
+        TimeEntry.occurred_at >= day_start,
+        TimeEntry.occurred_at < day_end,
+    ).order_by(TimeEntry.occurred_at.asc()).all()
+    total = 0.0
+    for index, entry in enumerate(entries):
+        if entry.activity != "exercise":
+            continue
+        next_entry = entries[index + 1] if index + 1 < len(entries) else None
+        if next_entry:
+            duration = (next_entry.occurred_at - entry.occurred_at).total_seconds() / 60
+            total += duration if 5 <= duration <= 240 else ROUTINE_BLOCK_MINUTES["exercise"]
+        else:
+            total += ROUTINE_BLOCK_MINUTES["exercise"]
+    exercise_tasks = db.query(Task).filter(
+        Task.user_id == current_user.id,
+        Task.scheduled_time >= day_start,
+        Task.scheduled_time < day_end,
+    ).all()
+    total += sum(
+        task.duration_minutes or 0 for task in exercise_tasks
+        if any(word in task.title.lower() for word in ("exercise", "workout", "gym", "run", "jog"))
+    )
+    return round(total, 1)
+
+
+def build_task_ml_input(
+    current_user: User,
+    db: Session,
+    deadline: datetime,
+    difficulty: Optional[str] = None,
+    reference_time: Optional[datetime] = None,
+) -> dict:
+    """Use saved user signals and real task timing; never inject placeholder deadlines."""
+    now = reference_time or datetime.utcnow()
+    latest = db.query(DynamicUserData).filter(
+        DynamicUserData.user_id == current_user.id,
+    ).order_by(DynamicUserData.recorded_at.desc()).first()
+    exercise_from_activity = derived_exercise_minutes(current_user, db, now.date())
+    logged_exercise = latest.exercise_minutes if latest and latest.exercise_minutes is not None else 0
+    energy = latest.energy_level if latest and latest.energy_level is not None else 5
+    stress = latest.stress_level if latest and latest.stress_level is not None else 5
+    mood_mapping = {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}
+    mood = mood_mapping.get((latest.mood or "neutral").lower(), 2) if latest else 2
+    deadline_days_left = max(0, int((deadline - now).total_seconds() / 86400 + 0.9999))
+    return {
+        "sleep_hours": latest.sleep_hours if latest and latest.sleep_hours is not None else 7,
+        "work_hours": latest.work_hours if latest and latest.work_hours is not None else 0,
+        "screen_time_hours": current_user.daily_screen_time if current_user.daily_screen_time is not None else 0,
+        "exercise_minutes": max(float(logged_exercise or 0), exercise_from_activity),
+        "mood": mood,
+        "energy_level": 0 if energy <= 3 else 1 if energy <= 7 else 2,
+        "stress_level": stress,
+        "focus_level": max(1, min(10, round((energy * 0.7) + ((10 - stress) * 0.3)))),
+        "task_difficulty": {"easy": 0, "medium": 1, "hard": 2}[normalized_task_difficulty(difficulty, current_user)],
+        "deadline_days_left": deadline_days_left,
+    }
+
+
+def store_task_prediction(task: Task, current_user: User, db: Session) -> dict:
+    insights = predict_task_insights(build_task_ml_input(
+        current_user, db, task.deadline or task.expected_end_time or task.scheduled_time, task.task_difficulty,
+    ))
+    if "error" not in insights:
+        task.predicted_productivity_score = insights["productivity_score"]
+        task.predicted_burnout_level = insights["burnout_risk"]
+        task.predicted_task_priority = insights["predicted_priority"]
+        task.predicted_task_completion = insights["expected_completion"]
+    return insights
 
 
 def occupied_schedule_blocks(
@@ -751,12 +942,14 @@ def create_task(
         deadline = data.end_time.replace(tzinfo=None)
         duration_minutes = data.duration_minutes
         final_priority = data.priority
+        final_difficulty = normalized_task_difficulty(data.task_difficulty, current_user)
     else:
         final_title = (title or "").strip()
         available_from = scheduled_time.replace(tzinfo=None) if scheduled_time else None
         deadline = expected_end_time.replace(tzinfo=None) if expected_end_time else None
         duration_minutes = int((expected_end_time - scheduled_time).total_seconds() // 60) if scheduled_time and expected_end_time else None
         final_priority = priority
+        final_difficulty = normalized_task_difficulty(None, current_user)
 
     if not final_title or not available_from:
         raise HTTPException(status_code=400, detail="Title and start time are required")
@@ -792,29 +985,14 @@ def create_task(
         duration_minutes=duration_minutes,
         status="pending",
         priority=final_priority,
+        task_difficulty=final_difficulty,
     )
 
     db.add(task)
+    store_task_prediction(task, current_user, db)
     db.commit()
     db.refresh(task)
-
-    return {
-        "id": task.id,
-        "notification_id": task.id,
-        "task_id": task.id,
-        "title": task.title,
-        "message": task.message,
-        "scheduled_time": task.scheduled_time,
-        "expected_end_time": task.expected_end_time,
-        "start_time": task.scheduled_time,
-        "end_time": task.deadline,
-        "deadline": task.deadline,
-        "duration_minutes": task.duration_minutes,
-        "status": task.status,
-        "priority": task.priority,
-        "start_notified": task.start_notified,
-        "end_notified": task.end_notified,
-    }
+    return task_to_dict(task)
 
 
 # ============================================================
@@ -855,6 +1033,13 @@ def get_tasks(
             "duration_minutes": task.duration_minutes,
             "status": task.status,
             "priority": task.priority,
+            "task_difficulty": task.task_difficulty,
+            "predictions": {
+                "productivity_score": task.predicted_productivity_score,
+                "burnout_level": task.predicted_burnout_level,
+                "task_priority": task.predicted_task_priority,
+                "task_completion": task.predicted_task_completion,
+            },
             "user_reason": task.user_reason,
             "rescheduled_time": task.rescheduled_time,
             "start_notified": task.start_notified,
@@ -885,6 +1070,39 @@ def get_task(
             detail="Task not found",
         )
 
+    return task_to_dict(task)
+
+
+@app.put("/tasks/{task_id}")
+def update_task(
+    task_id: int,
+    data: TaskUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if data.title is not None:
+        task.title = data.title.strip()
+        task.message = task.title
+    if data.priority is not None:
+        priority = data.priority.lower().strip()
+        if priority not in {"low", "medium", "high"}:
+            raise HTTPException(status_code=400, detail="Priority must be low, medium, or high")
+        task.priority = priority
+    if data.task_difficulty is not None:
+        task.task_difficulty = normalized_task_difficulty(data.task_difficulty, current_user)
+    start = data.start_time.replace(tzinfo=None) if data.start_time else task.scheduled_time
+    deadline = data.end_time.replace(tzinfo=None) if data.end_time else task.deadline
+    duration = data.duration_minutes if data.duration_minutes is not None else task.duration_minutes
+    if not deadline or deadline <= start or not duration or start + timedelta(minutes=duration) > deadline:
+        raise HTTPException(status_code=400, detail="The task duration must fit inside its start and deadline window")
+    task.scheduled_time, task.deadline, task.duration_minutes = start, deadline, duration
+    task.expected_end_time = start + timedelta(minutes=duration)
+    store_task_prediction(task, current_user, db)
+    db.commit()
+    db.refresh(task)
     return task_to_dict(task)
 
 
@@ -1397,18 +1615,15 @@ def build_second_mind_context(current_user: User, db: Session, now: Optional[dat
     energy_value = today_state["energy"]
     stress_value = today_state["stress"]
     sleep_value = today_state["sleep"] if today_state["sleep"] is not None else prior["sleep_hours"]
-    ml_input = {
-        "sleep_hours": sleep_value,
-        "work_hours": today_state["planned_minutes"] / 60,
-        "screen_time_hours": current_user.daily_screen_time or 0,
-        "exercise_minutes": prior["exercise_minutes"],
-        "mood": 2,
-        "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
-        "stress_level": stress_value,
-        "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
-        "task_difficulty": {"easy": 0, "medium": 1, "hard": 2}.get((current_user.preferred_task_difficulty or "medium").lower(), 1),
-        "deadline_days_left": 1,
-    }
+    next_task = min(
+        (task for task in tasks if task.status not in ("completed", "skipped") and task.deadline),
+        key=lambda task: task.deadline,
+        default=None,
+    )
+    ml_input = build_task_ml_input(
+        current_user, db, next_task.deadline if next_task else now + timedelta(days=7),
+        next_task.task_difficulty if next_task else None, now,
+    )
     return {
         "model": predict_task_insights(ml_input),
         "completed_count": len(completed),
@@ -1479,14 +1694,14 @@ def user_local_now(client_time: Optional[datetime], time_zone: str = "") -> date
         return client_time.astimezone().replace(tzinfo=None)
 
 
-def build_orbit_prompt(
+def assemble_orbit_context(
     current_user: User,
     db: Session,
     question: str,
     client_time: Optional[datetime] = None,
     time_zone: str = "",
 ) -> str:
-    """Build a bounded prompt from this user's actual plan and routine only."""
+    """Assemble profile, plans, history, routine, ML signals, and conversation for Gemini."""
     # Render runs in UTC; planned tasks and routine entries are entered in the
     # user's local time. Prefer the timestamp supplied by the signed-in app.
     now = user_local_now(client_time, time_zone)
@@ -1523,10 +1738,15 @@ def build_orbit_prompt(
         .order_by(DailyReview.review_date.desc())
         .first()
     )
+    conversation = db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id
+    ).order_by(CoachMessage.created_at.desc()).limit(12).all()
+    model_context = build_second_mind_context(current_user, db, now)
 
     planned = "\n".join(
         f"- {task.title} | {task.priority} priority | planned {format_orbit_datetime(task.scheduled_time)}"
-        f" | duration {task.duration_minutes or 'unspecified'} min | available until {format_orbit_datetime(task.deadline)}"
+        f" | duration {task.duration_minutes or 'unspecified'} min | difficulty {task.task_difficulty or 'not set'}"
+        f" | available until {format_orbit_datetime(task.deadline)} | predicted productivity {task.predicted_productivity_score if task.predicted_productivity_score is not None else 'not scored'}"
         for task in upcoming_tasks
     ) or "- No upcoming tasks have been planned."
     history = "\n".join(
@@ -1565,11 +1785,15 @@ def build_orbit_prompt(
         f"Notes: {latest_review.notes or 'none'}"
         if latest_review else "No end-of-day review has been recorded yet."
     )
+    conversation_text = "\n".join(
+        f"{item.role.title()}: {item.content}" for item in reversed(conversation)
+    ) or "- This is the first message in the conversation."
+    model_summary = model_context["model"]
 
     return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
 
 Current user-local time: {format_orbit_datetime(now)}{f' ({time_zone})' if time_zone else ''}.
-User: {current_user.name or 'there'}.
+User: {current_user.name or 'there'}; focus: {current_user.use_case or 'not set'}; planning style: {current_user.planning_style or 'not set'}; preferred focus: {current_user.preferred_focus_time or 'not set'}; free time: {current_user.daily_free_hours if current_user.daily_free_hours is not None else 'not set'} hours.
 
 The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
 
@@ -1600,8 +1824,17 @@ LATEST WELLBEING CHECK-IN:
 LATEST END-OF-DAY REVIEW:
 {review_summary}
 
+CURRENT ML PREDICTIONS:
+productivity {model_summary.get('productivity_score', 'unavailable')}; burnout {model_summary.get('burnout_risk', 'unavailable')}; suggested priority {model_summary.get('predicted_priority', 'unavailable')}; completion {model_summary.get('expected_completion', 'unavailable')}. These are advisory signals, not facts.
+
+RECENT CONVERSATION:
+{conversation_text}
+
 User question: {question}
 """
+
+
+build_orbit_prompt = assemble_orbit_context
 
 
 def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
@@ -1731,8 +1964,10 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         words = re.findall(r"[A-Za-z]{2,}", value)
         time_fragment = re.fullmatch(r"[\d\s:–—\-().,*APMapmto]+", value)
         return (
-            len(words) >= 18
-            and len(value) >= 110
+            # Conversational questions deserve a natural short reply too;
+            # reject only fragments, not concise but complete answers.
+            len(words) >= 6
+            and len(value) >= 30
             and not time_fragment
             and value.rstrip().endswith((".", "!", "?"))
         )
@@ -1899,20 +2134,10 @@ def coach_message(
     response = second_mind_response(context, message)
     response["today_state"] = context["today_state"]
     safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone)
-    scheduling_question = any(word in message.lower() for word in (
-        "when", "what time", "schedule", "plan", "running", "run", "jog", "workout", "exercise",
-        "study", "read", "novel", "book", "coding", "code", "project",
-    ))
-    if scheduling_question:
-        # Time recommendations are computed from hard scheduling constraints,
-        # not delegated to a generative model that can suggest past or blocked
-        # times. General conversation remains live AI below.
-        response["answer"] = safe_fallback
-        response["ai_mode"] = "schedule-aware"
-        return response
+    db.add(CoachMessage(user_id=current_user.id, role="user", content=message))
     try:
         response["answer"] = ask_orbit_ai(
-            build_orbit_prompt(current_user, db, message, data.client_time, data.time_zone),
+            assemble_orbit_context(current_user, db, message, data.client_time, data.time_zone),
             safe_fallback,
         )
         response["ai_mode"] = "live"
@@ -1923,7 +2148,20 @@ def coach_message(
         # outage; the answer remains grounded in the user's saved data.
         response["answer"] = safe_fallback
         response["ai_mode"] = "schedule fallback"
+    db.add(CoachMessage(user_id=current_user.id, role="assistant", content=response["answer"]))
+    db.commit()
     return response
+
+
+@app.get("/users/me/coach/messages")
+def get_coach_messages(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    messages = db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id
+    ).order_by(CoachMessage.created_at.desc()).limit(30).all()
+    return [{"role": item.role, "text": item.content, "created_at": item.created_at} for item in reversed(messages)]
 
 @app.get("/users/me/recommendations")
 def recommendations(
@@ -2028,28 +2266,18 @@ def recommendations(
     # The model complements (rather than replaces) transparent rule-based
     # advice, so recommendations remain useful even with little history.
     completion_rate = completed / total_logged if total_logged else 0
-    mood_value = (latest_daily_data.mood if latest_daily_data else "Neutral") or "Neutral"
-    mood_mapping = {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}
-    energy_value = latest_daily_data.energy_level if latest_daily_data else 5
-    stress_value = latest_daily_data.stress_level if latest_daily_data else 5
-    sleep_value = latest_daily_data.sleep_hours if latest_daily_data else 7
-    work_value = latest_daily_data.work_hours if latest_daily_data else 0
-    exercise_value = latest_daily_data.exercise_minutes if latest_daily_data else 0
-    ml_input = {
-        "sleep_hours": sleep_value,
-        "work_hours": work_value,
-        "screen_time_hours": current_user.daily_screen_time or 0,
-        "exercise_minutes": exercise_value,
-        "mood": mood_mapping.get(str(mood_value).lower(), 2),
-        "energy_level": 0 if energy_value <= 3 else 1 if energy_value <= 7 else 2,
-        "stress_level": stress_value,
-        "focus_level": max(1, min(10, round((energy_value * 0.7) + ((10 - stress_value) * 0.3)))),
-        "task_difficulty": {"easy": 0, "medium": 1, "hard": 2}.get(
-            (current_user.preferred_task_difficulty or "medium").lower(),
-            1,
-        ),
-        "deadline_days_left": 1,
-    }
+    energy_value = latest_daily_data.energy_level if latest_daily_data and latest_daily_data.energy_level is not None else 5
+    stress_value = latest_daily_data.stress_level if latest_daily_data and latest_daily_data.stress_level is not None else 5
+    sleep_value = latest_daily_data.sleep_hours if latest_daily_data and latest_daily_data.sleep_hours is not None else 7
+    next_task = min(
+        (task for task in tasks if task.status not in ("completed", "skipped") and task.deadline),
+        key=lambda task: task.deadline,
+        default=None,
+    )
+    ml_input = build_task_ml_input(
+        current_user, db, next_task.deadline if next_task else datetime.utcnow() + timedelta(days=7),
+        next_task.task_difficulty if next_task else None,
+    )
     ml_insights = predict_task_insights(ml_input)
     priority_labels = {"0": "low", "1": "medium", "2": "high"}
     completion_labels = {"0": "needs a smaller block", "1": "is likely achievable"}
@@ -2128,6 +2356,13 @@ def task_to_dict(task: Task):
         "duration_minutes": task.duration_minutes,
         "status": task.status,
         "priority": task.priority,
+        "task_difficulty": task.task_difficulty,
+        "predictions": {
+            "productivity_score": task.predicted_productivity_score,
+            "burnout_level": task.predicted_burnout_level,
+            "task_priority": task.predicted_task_priority,
+            "task_completion": task.predicted_task_completion,
+        },
         "user_reason": task.user_reason,
         "rescheduled_time": task.rescheduled_time,
         "start_notified": task.start_notified,

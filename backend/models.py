@@ -89,6 +89,11 @@ class Task(Base):
         default="medium",
         nullable=False
     )
+    task_difficulty = Column(String(20), nullable=True)
+    predicted_productivity_score = Column(Float, nullable=True)
+    predicted_burnout_level = Column(Float, nullable=True)
+    predicted_task_priority = Column(String(20), nullable=True)
+    predicted_task_completion = Column(String(20), nullable=True)
 
     user_reason = Column(Text, nullable=True)
     next_action = Column(Text, nullable=True)
@@ -181,3 +186,14 @@ class DailyReview(Base):
     skipped_tasks = Column(Integer, default=0, nullable=False)
     rescheduled_tasks = Column(Integer, default=0, nullable=False)
     recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CoachMessage(Base):
+    """A bounded, private conversation memory for Orbit."""
+    __tablename__ = "coach_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

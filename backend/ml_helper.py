@@ -30,8 +30,15 @@ def predict_task_insights(input_data: dict):
     productivity score aur burnout risk predict karne ke liye function.
     """
     try:
-        # Features extraction as per feature_columns order
-        features = [input_data.get(col, 0) for col in feature_columns]
+        # Preserve the model's training-column order while accepting missing
+        # optional signals (for example mood or screen time) safely.
+        optional_defaults = {"mood": 2, "screen_time_hours": 0}
+        features = []
+        for column in feature_columns:
+            value = input_data.get(column, optional_defaults.get(column, 0))
+            if value is None or (isinstance(value, float) and not np.isfinite(value)):
+                value = optional_defaults.get(column, 0)
+            features.append(float(value))
         scaled_features = scaler.transform([features])
 
         priority = task_priority_model.predict(scaled_features)[0]
@@ -43,7 +50,7 @@ def predict_task_insights(input_data: dict):
             "predicted_priority": str(priority),
             "expected_completion": str(completion),
             "productivity_score": float(productivity),
-            "burnout_risk": float(burnout)
+            "burnout_risk": float(burnout),
         }
     except Exception as e:
         return {"error": str(e)}
