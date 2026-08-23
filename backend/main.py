@@ -1962,7 +1962,9 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         # Keep the configuration portable across Gemini model generations.
-        "generationConfig": {"maxOutputTokens": 350},
+        # Leave enough room for a complete, context-aware answer; 350 tokens
+        # was short enough for Gemini to stop part-way through explanations.
+        "generationConfig": {"maxOutputTokens": 700},
     }).encode("utf-8")
     last_busy_diagnostic = ""
     try:
@@ -2051,7 +2053,7 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         # Retry once with a direct formatting correction before showing anything.
         retry_payload = json.dumps({
             "contents": [{"role": "user", "parts": [{"text": prompt + "\n\nReturn a complete natural-language answer now. Do not return a time fragment, bare range, markdown asterisk, or partial sentence. Explain the suggested future slot and the saved routine/task conflict you avoided."}]}],
-            "generationConfig": {"maxOutputTokens": 500},
+            "generationConfig": {"maxOutputTokens": 700},
         }).encode("utf-8")
         try:
             retry_request = urllib.request.Request(
