@@ -59,6 +59,7 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .routine-entry { display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: 7px; padding: 12px; border: 1px solid #ecebe5; border-radius: 10px; background: #fbfbf8; }
 .routine-entry input { grid-column: 2; padding: 8px; }
 .routine-icon { grid-row: span 2; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: #e8eedf; color: #48633d; font-size: 15px; }
+.routine-add { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }.routine-custom { display: flex; gap: 8px; }.routine-custom input { min-width: 0; }.routine-custom .secondary-button { white-space: nowrap; }.routine-actions { display: flex; gap: 12px; align-items: center; }.routine-actions .text-button { margin: 0; }.routine-actions .primary-button { margin-left: auto; width: auto; }
 .routine-help { align-self: start; background: #eef3e9; border-color: #d9e5d0; }
 .routine-help > p:not(.eyebrow) { color: #4d5e48; line-height: 1.65; font-size: 14px; }
 .routine-help .muted-copy { color: #64735f; }

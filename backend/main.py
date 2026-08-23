@@ -881,18 +881,39 @@ def find_free_task_slot(
     deadline: datetime,
     duration_minutes: int,
     db: Session,
+    activity_title: str = "",
 ) -> Optional[datetime]:
-    """Return the first task-sized gap within a user's requested window."""
+    """Return a free gap, keeping workouts out of unsafe midday/late-night hours."""
     candidate = available_from
     if candidate + timedelta(minutes=duration_minutes) > deadline:
         return None
+    is_exercise = any(word in activity_title.lower() for word in ("run", "jog", "workout", "exercise", "gym"))
+
+    def activity_fits(start: datetime) -> bool:
+        if not is_exercise:
+            return True
+        # Running/workouts belong in morning or early evening, never 12–15 or 23–05.
+        end = start + timedelta(minutes=duration_minutes)
+        return (5 <= start.hour < 12 or 17 <= start.hour < 22) and end.date() == start.date()
+
     for block in occupied_schedule_blocks(user_id, available_from, deadline, db):
-        if candidate + timedelta(minutes=duration_minutes) <= block["start"]:
+        if candidate + timedelta(minutes=duration_minutes) <= block["start"] and activity_fits(candidate):
             return candidate
         if block["end"] > candidate:
             candidate = block["end"]
-
-    return candidate if candidate + timedelta(minutes=duration_minutes) <= deadline else None
+    if candidate + timedelta(minutes=duration_minutes) <= deadline and activity_fits(candidate):
+        return candidate
+    # For exercise, search suitable morning/evening quarter-hour candidates.
+    if is_exercise:
+        cursor = max(available_from, datetime.combine(available_from.date(), datetime.min.time()).replace(hour=5))
+        while cursor + timedelta(minutes=duration_minutes) <= deadline:
+            if activity_fits(cursor) and not any(
+                cursor < block["end"] and cursor + timedelta(minutes=duration_minutes) > block["start"]
+                for block in occupied_schedule_blocks(user_id, cursor, cursor + timedelta(minutes=duration_minutes), db)
+            ):
+                return cursor
+            cursor += timedelta(minutes=15)
+    return None
 
 
 @app.post("/tasks/schedule-advice")
@@ -911,7 +932,7 @@ def schedule_advice(
         block for block in occupied_schedule_blocks(current_user.id, available_from, requested_end, db)
         if block["start"] < requested_end and block["end"] > available_from
     ]
-    suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db)
+    suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db, data.title)
     if not conflicts:
         return {"has_conflict": False, "message": "This time looks clear. You can keep this plan.", "suggested_start": available_from, "suggested_end": requested_end}
     labels = ", ".join(block["label"].title() for block in conflicts[:2])
@@ -967,7 +988,7 @@ def create_task(
     allocated_start = available_from
     if data and data.use_suggested_slot:
         allocated_start = find_free_task_slot(
-            current_user.id, available_from, deadline, duration_minutes, db
+            current_user.id, available_from, deadline, duration_minutes, db, final_title
         )
     if not allocated_start:
         raise HTTPException(
@@ -1320,7 +1341,7 @@ def save_time_entries(
     seen = set()
     for input_entry in data.entries:
         activity = input_entry.activity.strip().lower()
-        if activity not in ROUTINE_ACTIVITIES:
+        if activity not in ROUTINE_ACTIVITIES and not re.fullmatch(r"custom_[a-z0-9_]{1,40}", activity):
             raise HTTPException(status_code=400, detail=f"Unsupported routine activity: {activity}")
         if activity in seen:
             raise HTTPException(status_code=400, detail="Each activity can be entered once per save")
@@ -1789,11 +1810,13 @@ def assemble_orbit_context(
         f"{item.role.title()}: {item.content}" for item in reversed(conversation)
     ) or "- This is the first message in the conversation."
     model_summary = model_context["model"]
+    account_stage = "new user, still building a history" if model_context["completed_count"] < 3 else "returning user with saved history"
+    routine_status = "routine has entries today" if today_routine else "no routine entries saved today"
 
     return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
 
 Current user-local time: {format_orbit_datetime(now)}{f' ({time_zone})' if time_zone else ''}.
-User: {current_user.name or 'there'}; focus: {current_user.use_case or 'not set'}; planning style: {current_user.planning_style or 'not set'}; preferred focus: {current_user.preferred_focus_time or 'not set'}; free time: {current_user.daily_free_hours if current_user.daily_free_hours is not None else 'not set'} hours.
+User: {current_user.name or 'there'}; {account_stage}; today {routine_status}; focus: {current_user.use_case or 'not set'}; planning style: {current_user.planning_style or 'not set'}; preferred focus: {current_user.preferred_focus_time or 'not set'}; free time: {current_user.daily_free_hours if current_user.daily_free_hours is not None else 'not set'} hours.
 
 The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
 
@@ -1997,8 +2020,20 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         print(f"Orbit AI returned no usable answer: {body.get('promptFeedback', {})}")
         raise HTTPException(status_code=502, detail="Orbit did not return an answer. Please rephrase and try again.")
     if not is_usable_answer(answer):
-        return safe_fallback
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini returned an incomplete response. Please try your message again.",
+        )
     return answer
+
+
+def is_explicit_scheduling_request(message: str) -> bool:
+    """Only schedule when the user actually asks to schedule or find a time."""
+    text = message.lower()
+    return bool(re.search(
+        r"\b(schedule|reschedule|plan|slot|calendar|what time|when should i|find (?:me )?a time|fit .* (?:today|tomorrow))\b",
+        text,
+    ))
 
 
 def build_orbit_safe_fallback(
@@ -2133,7 +2168,8 @@ def coach_message(
     context = build_second_mind_context(current_user, db, local_now)
     response = second_mind_response(context, message)
     response["today_state"] = context["today_state"]
-    safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone)
+    scheduling_request = is_explicit_scheduling_request(message)
+    safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone) if scheduling_request else ""
     db.add(CoachMessage(user_id=current_user.id, role="user", content=message))
     try:
         response["answer"] = ask_orbit_ai(
@@ -2144,8 +2180,10 @@ def coach_message(
     except HTTPException as error:
         if error.status_code < 500:
             raise
-        # Keep practical scheduling available during a temporary provider
-        # outage; the answer remains grounded in the user's saved data.
+        if not scheduling_request:
+            # Do not turn a greeting into a made-up planning slot when Gemini
+            # is unavailable; expose the actionable provider failure instead.
+            raise HTTPException(status_code=error.status_code, detail=error.detail)
         response["answer"] = safe_fallback
         response["ai_mode"] = "schedule fallback"
     db.add(CoachMessage(user_id=current_user.id, role="assistant", content=response["answer"]))
