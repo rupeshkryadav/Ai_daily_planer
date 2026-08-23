@@ -1863,7 +1863,7 @@ def assemble_orbit_context(
 Current user-local time: {format_orbit_datetime(now)}{f' ({time_zone})' if time_zone else ''}.
 User: {current_user.name or 'there'}; {account_stage}; today {routine_status}; focus: {current_user.use_case or 'not set'}; planning style: {current_user.planning_style or 'not set'}; preferred focus: {current_user.preferred_focus_time or 'not set'}; free time: {current_user.daily_free_hours if current_user.daily_free_hours is not None else 'not set'} hours.
 
-The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
+The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity. Always finish every thought with a fully formed, grammatically complete sentence. Never end an answer mid-sentence or mid-bullet.
 
 {calibration_instruction}
 
@@ -1971,7 +1971,7 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         # Keep the configuration portable across Gemini model generations.
         # Leave enough room for a complete, context-aware answer; 350 tokens
         # was short enough for Gemini to stop part-way through explanations.
-        "generationConfig": {"maxOutputTokens": 700},
+        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7},
     }).encode("utf-8")
     last_busy_diagnostic = ""
     try:
@@ -2047,11 +2047,16 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
 
     def is_usable_answer(value: str) -> bool:
         time_fragment = re.fullmatch(r"[\d\s:–—\-().,*APMapmto]+", value)
+        words = re.findall(r"[A-Za-z]{2,}", value)
+        # Short greetings can legitimately be complete without punctuation;
+        # a longer response should always finish its final sentence.
+        completed_ending = value.rstrip().rstrip('”’\")]}').endswith((".", "!", "?"))
         return (
             # Greetings such as “Hi!” can have short but complete answers.
             # Reject empty/fragment responses, not ordinary conversation.
             len(value.strip()) >= 2
             and not time_fragment
+            and (len(words) <= 6 or completed_ending)
         )
 
     answer = response_text(body)
@@ -2060,7 +2065,7 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         # Retry once with a direct formatting correction before showing anything.
         retry_payload = json.dumps({
             "contents": [{"role": "user", "parts": [{"text": prompt + "\n\nReturn a complete natural-language answer now. Do not return a time fragment, bare range, markdown asterisk, or partial sentence. Explain the suggested future slot and the saved routine/task conflict you avoided."}]}],
-            "generationConfig": {"maxOutputTokens": 700},
+            "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7},
         }).encode("utf-8")
         try:
             retry_request = urllib.request.Request(
