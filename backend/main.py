@@ -1851,6 +1851,11 @@ def assemble_orbit_context(
     ) or "- This is the first message in the conversation."
     model_summary = model_context["model"]
     account_stage = "new user, still building a history" if model_context["completed_count"] < 3 else "returning user with saved history"
+    calibration_instruction = (
+        "CALIBRATION MODE IS ACTIVE: this user has 0–1 completed tasks. You do not have enough evidence to describe their energy, burnout, focus, or productivity as high, steady, low, improving, or declining. Explicitly say you are still calibrating and that accurate energy/burnout trends will become available as they log more tasks and routine check-ins. You may only describe a value that appears in the supplied check-in, and must label it as a single self-reported snapshot—not a trend."
+        if model_context["completed_count"] <= 1 else
+        "Use energy and burnout language only when it is supported by the supplied recent check-ins and task history."
+    )
     routine_status = "routine has entries today" if today_routine else "no routine entries saved today"
 
     return f"""You are Orbit, a warm, practical personal planning assistant. Reply naturally, as a thoughtful person—not as a generic chatbot.
@@ -1859,6 +1864,8 @@ Current user-local time: {format_orbit_datetime(now)}{f' ({time_zone})' if time_
 User: {current_user.name or 'there'}; {account_stage}; today {routine_status}; focus: {current_user.use_case or 'not set'}; planning style: {current_user.planning_style or 'not set'}; preferred focus: {current_user.preferred_focus_time or 'not set'}; free time: {current_user.daily_free_hours if current_user.daily_free_hours is not None else 'not set'} hours.
 
 The following is private, real data from this user's account. Use it to answer accurately. Do not claim you completed, changed, or scheduled anything. If the needed information is absent, say so plainly and suggest the smallest helpful next step. Do not make up appointments, routines, facts, or times. Keep the answer to at most 140 words and use short paragraphs or bullets only when they improve clarity.
+
+{calibration_instruction}
 
 For scheduling questions, first account for the current user-local time, every planned task window and duration, and today's saved routine commitments. Treat a saved routine time as busy: never recommend that exact time, or the 30 minutes around it, unless the user explicitly asks to replace it. Prefer a future free slot. State why the suggested time fits and mention a conflict when you avoided one. Never answer with only a time, an asterisk, or an unexplained one-line schedule.
 
@@ -2279,6 +2286,26 @@ def coach_session_to_dict(session: CoachChatSession) -> dict:
 def get_coach_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     sessions = db.query(CoachChatSession).filter(CoachChatSession.user_id == current_user.id).order_by(CoachChatSession.updated_at.desc()).limit(50).all()
     return [coach_session_to_dict(session) for session in sessions]
+
+
+@app.delete("/users/me/coach/sessions/{session_id}")
+def delete_coach_session(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = db.query(CoachChatSession).filter(
+        CoachChatSession.id == session_id, CoachChatSession.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    # Explicitly remove messages too for legacy databases without FK cascades.
+    db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id
+    ).delete(synchronize_session=False)
+    db.delete(session)
+    db.commit()
+    return {"message": "Chat deleted", "id": session_id}
 
 
 @app.get("/users/me/coach/messages")

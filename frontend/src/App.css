@@ -74,9 +74,14 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .coach-session:hover, .coach-session.active { background: #eef3e9; color: #365630; }
 .coach-session b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .coach-session small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: #858294; }
+.coach-session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-radius: 8px; }
+.coach-session-row:has(.coach-session.active) { background: #eef3e9; }
+.coach-session-row .coach-session { min-width: 0; }
+.delete-chat { border: 0; background: transparent; color: #858294; padding: 8px; font-size: 17px; line-height: 1; }
+.delete-chat:hover { color: #9a4944; }
 .coach-conversation { display: grid; gap: 15px; }
 .coach-conversation > .muted-copy { margin-top: -8px; }
-.message-stack { display: grid; grid-auto-rows: max-content; align-content: start; gap: 10px; min-height: 260px; max-height: min(65vh, 620px); overflow-y: auto; overflow-x: hidden; padding: 4px 2px; }
+.message-stack { display: grid; grid-auto-rows: max-content; align-content: start; gap: 10px; min-height: 260px; max-height: none; overflow: visible; padding: 4px 2px; }
 .coach-message { width: fit-content; height: fit-content; max-width: 82%; padding: 12px 14px; border-radius: 12px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .coach-message.assistant { background: #e8eedf; color: #40533b; border-top-left-radius: 3px; }
 .coach-message.user { justify-self: end; background: #303046; color: #fff; border-top-right-radius: 3px; }
