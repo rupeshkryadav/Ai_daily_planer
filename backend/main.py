@@ -31,7 +31,7 @@ import base64
 import json
 
 from database import engine, Base, get_db, migrate_legacy_schema, SessionLocal
-from models import User, Task, DynamicUserData, TimeEntry, DailyReview, CoachMessage
+from models import User, Task, DynamicUserData, TimeEntry, DailyReview, CoachMessage, CoachChatSession
 from ml_helper import predict_task_insights
 
 
@@ -353,8 +353,14 @@ class TimeEntriesRequest(BaseModel):
 
 class CoachMessageRequest(BaseModel):
     message: str
+    session_id: Optional[int] = None
     client_time: Optional[datetime] = None
     time_zone: str = Field(default="", max_length=64)
+
+
+class RoutineCheckInStatusRequest(BaseModel):
+    date: date
+    dismissed: bool = False
 
 
 class DailyReviewRequest(BaseModel):
@@ -537,6 +543,7 @@ def get_me(
         "daily_free_hours": current_user.daily_free_hours,
         "preferred_task_difficulty": current_user.preferred_task_difficulty,
         "onboarding_complete": current_user.onboarding_complete,
+        "last_routine_completed_date": current_user.last_routine_completed_date,
     }
 
 
@@ -736,6 +743,7 @@ def complete_onboarding(
         energy_level=data.energy_level,
     ))
     current_user.onboarding_complete = True
+    current_user.last_routine_completed_date = data.routine_date.isoformat()
     db.commit()
     db.refresh(current_user)
     return {"message": "Onboarding complete", "user": get_me(current_user)}
@@ -893,8 +901,7 @@ def find_free_task_slot(
         if not is_exercise:
             return True
         # Running/workouts belong in morning or early evening, never 12–15 or 23–05.
-        end = start + timedelta(minutes=duration_minutes)
-        return (5 <= start.hour < 12 or 17 <= start.hour < 22) and end.date() == start.date()
+        return physical_activity_window_is_safe(start, duration_minutes)
 
     for block in occupied_schedule_blocks(user_id, available_from, deadline, db):
         if candidate + timedelta(minutes=duration_minutes) <= block["start"] and activity_fits(candidate):
@@ -916,6 +923,16 @@ def find_free_task_slot(
     return None
 
 
+def physical_activity_window_is_safe(start: datetime, duration_minutes: int) -> bool:
+    """Physical sessions belong to a same-day morning or early-evening block."""
+    end = start + timedelta(minutes=duration_minutes)
+    return (5 <= start.hour < 12 or 17 <= start.hour < 22) and end.date() == start.date()
+
+
+def is_physical_activity(title: str) -> bool:
+    return any(word in title.lower() for word in ("run", "jog", "workout", "exercise", "gym"))
+
+
 @app.post("/tasks/schedule-advice")
 def schedule_advice(
     data: TaskCreateRequest,
@@ -927,6 +944,9 @@ def schedule_advice(
     requested_end = available_from + timedelta(minutes=data.duration_minutes)
     if deadline <= available_from or requested_end > deadline:
         raise HTTPException(status_code=400, detail="Duration must fit inside the selected window")
+    if is_physical_activity(data.title) and not physical_activity_window_is_safe(available_from, data.duration_minutes):
+        suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db, data.title)
+        return {"has_conflict": True, "message": "Physical activities are protected from 12–3 PM and 11 PM–5 AM. Choose a morning or early-evening gap.", "suggested_start": suggestion, "suggested_end": suggestion + timedelta(minutes=data.duration_minutes) if suggestion else None, "conflicts": []}
 
     conflicts = [
         block for block in occupied_schedule_blocks(current_user.id, available_from, requested_end, db)
@@ -980,6 +1000,8 @@ def create_task(
         raise HTTPException(status_code=400, detail="Duration must be greater than zero")
     if available_from + timedelta(minutes=duration_minutes) > deadline:
         raise HTTPException(status_code=400, detail="Duration must fit inside the available time window")
+    if is_physical_activity(final_title) and not physical_activity_window_is_safe(available_from, duration_minutes):
+        raise HTTPException(status_code=400, detail="Physical activities must be scheduled in a morning or early-evening window, not 12–3 PM or 11 PM–5 AM.")
 
     final_priority = final_priority.lower().strip()
     if final_priority not in {"low", "medium", "high"}:
@@ -1119,6 +1141,8 @@ def update_task(
     duration = data.duration_minutes if data.duration_minutes is not None else task.duration_minutes
     if not deadline or deadline <= start or not duration or start + timedelta(minutes=duration) > deadline:
         raise HTTPException(status_code=400, detail="The task duration must fit inside its start and deadline window")
+    if is_physical_activity(task.title) and not physical_activity_window_is_safe(start, duration):
+        raise HTTPException(status_code=400, detail="Physical activities must be scheduled in a morning or early-evening window, not 12–3 PM or 11 PM–5 AM.")
     task.scheduled_time, task.deadline, task.duration_minutes = start, deadline, duration
     task.expected_end_time = start + timedelta(minutes=duration)
     store_task_prediction(task, current_user, db)
@@ -1361,7 +1385,21 @@ def save_time_entries(
     db.commit()
     for entry in saved:
         db.refresh(entry)
+    current_user.last_routine_completed_date = max(entry.occurred_at.date() for entry in saved).isoformat()
+    db.commit()
     return {"message": "Routine times saved", "entries": [time_entry_to_dict(entry) for entry in saved]}
+
+
+@app.put("/users/me/routine-check-in-status")
+def set_routine_check_in_status(
+    data: RoutineCheckInStatusRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Record a save or an intentional dismissal for the current local day."""
+    current_user.last_routine_completed_date = data.date.isoformat()
+    db.commit()
+    return {"last_routine_completed_date": current_user.last_routine_completed_date, "dismissed": data.dismissed}
 
 
 @app.post("/users/me/daily-review")
@@ -1721,6 +1759,7 @@ def assemble_orbit_context(
     question: str,
     client_time: Optional[datetime] = None,
     time_zone: str = "",
+    session_id: Optional[int] = None,
 ) -> str:
     """Assemble profile, plans, history, routine, ML signals, and conversation for Gemini."""
     # Render runs in UTC; planned tasks and routine entries are entered in the
@@ -1759,9 +1798,10 @@ def assemble_orbit_context(
         .order_by(DailyReview.review_date.desc())
         .first()
     )
-    conversation = db.query(CoachMessage).filter(
-        CoachMessage.user_id == current_user.id
-    ).order_by(CoachMessage.created_at.desc()).limit(12).all()
+    conversation_query = db.query(CoachMessage).filter(CoachMessage.user_id == current_user.id)
+    if session_id is not None:
+        conversation_query = conversation_query.filter(CoachMessage.session_id == session_id)
+    conversation = conversation_query.order_by(CoachMessage.created_at.desc()).limit(12).all()
     model_context = build_second_mind_context(current_user, db, now)
 
     planned = "\n".join(
@@ -1978,21 +2018,31 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         print(f"Orbit AI network request failed: {error}")
         raise HTTPException(status_code=502, detail="Orbit could not reach the AI service. Please try again shortly.")
 
-    def response_text(response_body: dict) -> str:
-        candidates = response_body.get("candidates") or []
-        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-        return "".join(part.get("text", "") for part in parts).strip()
+    def response_text(response_body) -> str:
+        """Read both Gemini SDK-style and REST-style successful responses."""
+        direct_text = getattr(response_body, "text", None)
+        if isinstance(response_body, dict):
+            direct_text = response_body.get("text") or direct_text
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+        candidates = response_body.get("candidates", []) if isinstance(response_body, dict) else getattr(response_body, "candidates", [])
+        if not candidates:
+            return ""
+        candidate = candidates[0]
+        content = candidate.get("content", {}) if isinstance(candidate, dict) else getattr(candidate, "content", None)
+        parts = content.get("parts", []) if isinstance(content, dict) else getattr(content, "parts", [])
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else (getattr(part, "text", "") or "")
+            for part in (parts or [])
+        ).strip()
 
     def is_usable_answer(value: str) -> bool:
-        words = re.findall(r"[A-Za-z]{2,}", value)
         time_fragment = re.fullmatch(r"[\d\s:–—\-().,*APMapmto]+", value)
         return (
-            # Conversational questions deserve a natural short reply too;
-            # reject only fragments, not concise but complete answers.
-            len(words) >= 6
-            and len(value) >= 30
+            # Greetings such as “Hi!” can have short but complete answers.
+            # Reject empty/fragment responses, not ordinary conversation.
+            len(value.strip()) >= 2
             and not time_fragment
-            and value.rstrip().endswith((".", "!", "?"))
         )
 
     answer = response_text(body)
@@ -2020,10 +2070,7 @@ def ask_orbit_ai(prompt: str, safe_fallback: str) -> str:
         print(f"Orbit AI returned no usable answer: {body.get('promptFeedback', {})}")
         raise HTTPException(status_code=502, detail="Orbit did not return an answer. Please rephrase and try again.")
     if not is_usable_answer(answer):
-        raise HTTPException(
-            status_code=502,
-            detail="Gemini returned an incomplete response. Please try your message again.",
-        )
+        raise HTTPException(status_code=502, detail="Gemini returned no readable text. Please try again.")
     return answer
 
 
@@ -2164,16 +2211,31 @@ def coach_message(
         raise HTTPException(status_code=400, detail="Ask Orbit a question first")
     if len(message) > 500:
         raise HTTPException(status_code=400, detail="Keep your question under 500 characters")
+    session = None
+    if data.session_id is not None:
+        session = db.query(CoachChatSession).filter(
+            CoachChatSession.id == data.session_id, CoachChatSession.user_id == current_user.id
+        ).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+    else:
+        # Backward-compatible default: continue an existing latest chat, or
+        # create one for people who used Orbit before sessions were added.
+        session = db.query(CoachChatSession).filter(CoachChatSession.user_id == current_user.id).order_by(CoachChatSession.updated_at.desc()).first()
+        if not session:
+            session = CoachChatSession(user_id=current_user.id, title="New chat")
+            db.add(session)
+            db.flush()
     local_now = user_local_now(data.client_time, data.time_zone)
     context = build_second_mind_context(current_user, db, local_now)
     response = second_mind_response(context, message)
     response["today_state"] = context["today_state"]
     scheduling_request = is_explicit_scheduling_request(message)
     safe_fallback = build_orbit_safe_fallback(current_user, db, message, data.client_time, data.time_zone) if scheduling_request else ""
-    db.add(CoachMessage(user_id=current_user.id, role="user", content=message))
+    db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
     try:
         response["answer"] = ask_orbit_ai(
-            assemble_orbit_context(current_user, db, message, data.client_time, data.time_zone),
+            assemble_orbit_context(current_user, db, message, data.client_time, data.time_zone, session.id),
             safe_fallback,
         )
         response["ai_mode"] = "live"
@@ -2186,19 +2248,50 @@ def coach_message(
             raise HTTPException(status_code=error.status_code, detail=error.detail)
         response["answer"] = safe_fallback
         response["ai_mode"] = "schedule fallback"
-    db.add(CoachMessage(user_id=current_user.id, role="assistant", content=response["answer"]))
+    if session.title == "New chat":
+        session.title = message[:80].strip() or "New chat"
+    session.preview = response["answer"][:255]
+    session.updated_at = datetime.utcnow()
+    db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=response["answer"]))
     db.commit()
+    response["session_id"] = session.id
     return response
+
+
+@app.post("/users/me/coach/sessions")
+def create_coach_session(
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    session = CoachChatSession(user_id=current_user.id, title="New chat")
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return coach_session_to_dict(session)
+
+
+def coach_session_to_dict(session: CoachChatSession) -> dict:
+    return {"id": session.id, "title": session.title, "preview": session.preview, "created_at": session.created_at, "updated_at": session.updated_at}
+
+
+@app.get("/users/me/coach/sessions")
+def get_coach_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sessions = db.query(CoachChatSession).filter(CoachChatSession.user_id == current_user.id).order_by(CoachChatSession.updated_at.desc()).limit(50).all()
+    return [coach_session_to_dict(session) for session in sessions]
 
 
 @app.get("/users/me/coach/messages")
 def get_coach_messages(
+    session_id: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    messages = db.query(CoachMessage).filter(
-        CoachMessage.user_id == current_user.id
-    ).order_by(CoachMessage.created_at.desc()).limit(30).all()
+    query = db.query(CoachMessage).filter(CoachMessage.user_id == current_user.id)
+    if session_id is not None:
+        owns_session = db.query(CoachChatSession.id).filter(CoachChatSession.id == session_id, CoachChatSession.user_id == current_user.id).first()
+        if not owns_session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        query = query.filter(CoachMessage.session_id == session_id)
+    messages = query.order_by(CoachMessage.created_at.desc()).limit(60).all()
     return [{"role": item.role, "text": item.content, "created_at": item.created_at} for item in reversed(messages)]
 
 @app.get("/users/me/recommendations")

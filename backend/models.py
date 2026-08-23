@@ -39,6 +39,9 @@ class User(Base):
     daily_free_hours = Column(Float, nullable=True)
     preferred_task_difficulty = Column(String(20), nullable=True)
     onboarding_complete = Column(Boolean, default=False, nullable=False)
+    # A server-side value makes the once-per-day routine check-in consistent
+    # across browsers and devices (rather than relying only on localStorage).
+    last_routine_completed_date = Column(String(10), nullable=True)
 
     created_at = Column(
         DateTime,
@@ -194,6 +197,19 @@ class CoachMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(Integer, ForeignKey("coach_chat_sessions.id", ondelete="CASCADE"), nullable=True, index=True)
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class CoachChatSession(Base):
+    """A named Orbit conversation. Messages remain private to its owner."""
+    __tablename__ = "coach_chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(120), nullable=False, default="New chat")
+    preview = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)

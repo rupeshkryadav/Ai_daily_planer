@@ -44,6 +44,7 @@ def migrate_legacy_schema():
             "daily_free_hours": "FLOAT",
             "preferred_task_difficulty": "VARCHAR(20)",
             "onboarding_complete": "BOOLEAN DEFAULT FALSE",
+            "last_routine_completed_date": "VARCHAR(10)",
         },
         "tasks": {
             "message": "TEXT",
@@ -61,6 +62,7 @@ def migrate_legacy_schema():
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         },
+        "coach_messages": {"session_id": "INTEGER"},
     }
 
     inspector = inspect(engine)
@@ -74,6 +76,18 @@ def migrate_legacy_schema():
                     connection.execute(
                         text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                     )
+        # create_all creates this for new installations; legacy deployments
+        # need this explicitly because it is a new table.
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS coach_chat_sessions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title VARCHAR(120) NOT NULL DEFAULT 'New chat',
+                preview VARCHAR(255),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
 
 
 def get_db():
