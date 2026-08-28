@@ -330,6 +330,8 @@ class TaskCreateRequest(BaseModel):
     duration_minutes: int = Field(gt=0, le=60 * 24 * 30)
     priority: str = "medium"
     task_difficulty: Optional[str] = None
+    current_energy_level: Optional[float] = Field(default=None, ge=1, le=10)
+    current_stress_level: Optional[float] = Field(default=None, ge=1, le=10)
     use_suggested_slot: bool = False
 
 
@@ -356,6 +358,11 @@ class CoachMessageRequest(BaseModel):
     session_id: Optional[int] = None
     client_time: Optional[datetime] = None
     time_zone: str = Field(default="", max_length=64)
+
+
+class CoachTaskActionRequest(TaskCreateRequest):
+    """Explicit chat action; confirmation prevents suggestion text becoming a task."""
+    confirmed: bool = False
 
 
 class RoutineCheckInStatusRequest(BaseModel):
@@ -592,6 +599,10 @@ def update_profile(
             detail="Complete the required onboarding flow to activate your workspace",
         )
 
+    db.commit()
+    db.refresh(current_user)
+    return {"message": "Profile updated", "user": get_me(current_user)}
+
 
 def create_password_reset_token(user: User) -> str:
     """Create a short-lived reset token invalidated when the password changes."""
@@ -600,6 +611,9 @@ def create_password_reset_token(user: User) -> str:
         "exp": int((datetime.utcnow() + timedelta(minutes=30)).timestamp()),
         "password_version": hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16],
     }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    signature = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
 
 
 @app.post("/password-reset/request")
@@ -640,9 +654,6 @@ def confirm_password_reset(data: PasswordResetConfirmRequest, db: Session = Depe
     user.hashed_password = None
     db.commit()
     return {"message": "Password reset. You can now sign in with your new password."}
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
-    signature = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
 
 
 def decode_password_reset_token(token: str, user: User) -> None:
@@ -805,6 +816,8 @@ def build_task_ml_input(
     deadline: datetime,
     difficulty: Optional[str] = None,
     reference_time: Optional[datetime] = None,
+    energy_override: Optional[float] = None,
+    stress_override: Optional[float] = None,
 ) -> dict:
     """Use saved user signals and real task timing; never inject placeholder deadlines."""
     now = reference_time or datetime.utcnow()
@@ -813,8 +826,8 @@ def build_task_ml_input(
     ).order_by(DynamicUserData.recorded_at.desc()).first()
     exercise_from_activity = derived_exercise_minutes(current_user, db, now.date())
     logged_exercise = latest.exercise_minutes if latest and latest.exercise_minutes is not None else 0
-    energy = latest.energy_level if latest and latest.energy_level is not None else 5
-    stress = latest.stress_level if latest and latest.stress_level is not None else 5
+    energy = energy_override if energy_override is not None else (latest.energy_level if latest and latest.energy_level is not None else 5)
+    stress = stress_override if stress_override is not None else (latest.stress_level if latest and latest.stress_level is not None else 5)
     mood_mapping = {"happy": 0, "motivated": 1, "neutral": 2, "sad": 3, "stressed": 4}
     mood = mood_mapping.get((latest.mood or "neutral").lower(), 2) if latest else 2
     deadline_days_left = max(0, int((deadline - now).total_seconds() / 86400 + 0.9999))
@@ -835,6 +848,7 @@ def build_task_ml_input(
 def store_task_prediction(task: Task, current_user: User, db: Session) -> dict:
     insights = predict_task_insights(build_task_ml_input(
         current_user, db, task.deadline or task.expected_end_time or task.scheduled_time, task.task_difficulty,
+        energy_override=task.task_energy_level, stress_override=task.task_stress_level,
     ))
     if "error" not in insights:
         task.predicted_productivity_score = insights["productivity_score"]
@@ -944,9 +958,15 @@ def schedule_advice(
     requested_end = available_from + timedelta(minutes=data.duration_minutes)
     if deadline <= available_from or requested_end > deadline:
         raise HTTPException(status_code=400, detail="Duration must fit inside the selected window")
+    task_input = build_task_ml_input(
+        current_user, db, deadline, data.task_difficulty,
+        energy_override=data.current_energy_level, stress_override=data.current_stress_level,
+    )
+    insights = predict_task_insights(task_input)
+    completion_probability = completion_probability_for_insights(insights, data.current_energy_level, data.current_stress_level)
     if is_physical_activity(data.title) and not physical_activity_window_is_safe(available_from, data.duration_minutes):
         suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db, data.title)
-        return {"has_conflict": True, "message": "Physical activities are protected from 12–3 PM and 11 PM–5 AM. Choose a morning or early-evening gap.", "suggested_start": suggestion, "suggested_end": suggestion + timedelta(minutes=data.duration_minutes) if suggestion else None, "conflicts": []}
+        return {"has_conflict": True, "message": "Physical activities are protected from 12–3 PM and 11 PM–5 AM. Choose a morning or early-evening gap.", "suggested_start": suggestion, "suggested_end": suggestion + timedelta(minutes=data.duration_minutes) if suggestion else None, "conflicts": [], "completion_probability": completion_probability}
 
     conflicts = [
         block for block in occupied_schedule_blocks(current_user.id, available_from, requested_end, db)
@@ -954,7 +974,7 @@ def schedule_advice(
     ]
     suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db, data.title)
     if not conflicts:
-        return {"has_conflict": False, "message": "This time looks clear. You can keep this plan.", "suggested_start": available_from, "suggested_end": requested_end}
+        return {"has_conflict": False, "message": "This time looks clear. You can keep this plan.", "suggested_start": available_from, "suggested_end": requested_end, "completion_probability": completion_probability}
     labels = ", ".join(block["label"].title() for block in conflicts[:2])
     if suggestion:
         suggested_end = suggestion + timedelta(minutes=data.duration_minutes)
@@ -964,8 +984,23 @@ def schedule_advice(
             "suggested_start": suggestion,
             "suggested_end": suggested_end,
             "conflicts": [{"label": block["label"], "kind": block["kind"]} for block in conflicts],
+            "completion_probability": completion_probability,
         }
-    return {"has_conflict": True, "message": f"This overlaps with {labels}. No clear slot of this length was found before the deadline, so keep it only if you can move that activity.", "suggested_start": None, "suggested_end": None, "conflicts": [{"label": block["label"], "kind": block["kind"]} for block in conflicts]}
+    return {"has_conflict": True, "message": f"This overlaps with {labels}. No clear slot of this length was found before the deadline, so keep it only if you can move that activity.", "suggested_start": None, "suggested_end": None, "conflicts": [{"label": block["label"], "kind": block["kind"]} for block in conflicts], "completion_probability": completion_probability}
+
+
+def completion_probability_for_insights(insights: dict, energy: Optional[float] = None, stress: Optional[float] = None) -> int:
+    """Translate model output plus current self-report into a stable 0–100 score."""
+    score = insights.get("productivity_score") if isinstance(insights, dict) else None
+    try:
+        probability = float(score) * (100 if float(score) <= 1 else 1)
+    except (TypeError, ValueError):
+        probability = 65.0
+    if energy is not None:
+        probability += (float(energy) - 5) * 3
+    if stress is not None:
+        probability -= (float(stress) - 5) * 3
+    return max(5, min(95, round(probability)))
 
 @app.post("/tasks/")
 def create_task(
@@ -1029,6 +1064,8 @@ def create_task(
         status="pending",
         priority=final_priority,
         task_difficulty=final_difficulty,
+        task_energy_level=data.current_energy_level if data else None,
+        task_stress_level=data.current_stress_level if data else None,
     )
 
     db.add(task)
@@ -1077,6 +1114,8 @@ def get_tasks(
             "status": task.status,
             "priority": task.priority,
             "task_difficulty": task.task_difficulty,
+            "current_energy_level": task.task_energy_level,
+            "current_stress_level": task.task_stress_level,
             "predictions": {
                 "productivity_score": task.predicted_productivity_score,
                 "burnout_level": task.predicted_burnout_level,
@@ -1085,6 +1124,8 @@ def get_tasks(
             },
             "user_reason": task.user_reason,
             "rescheduled_time": task.rescheduled_time,
+            "completed_at": task.completed_at,
+            "delay_duration_minutes": task.delay_duration_minutes,
             "start_notified": task.start_notified,
             "end_notified": task.end_notified,
         }
@@ -1114,6 +1155,26 @@ def get_task(
         )
 
     return task_to_dict(task)
+
+
+@app.get("/tasks/{task_id}/insight")
+def task_insight(task_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    state = infer_today_state(current_user, db, datetime.utcnow())
+    probability = completion_probability_for_insights(
+        {"productivity_score": task.predicted_productivity_score}, state["energy"], state["stress"]
+    )
+    workload = state["planned_minutes"]
+    fit = "fits well" if probability >= 70 else "may be challenging" if probability >= 45 else "is best kept lighter or moved"
+    recommendation = (
+        f"This task {fit} today. "
+        f"Your current plan has {workload} minutes scheduled, with energy and stress signals considered in the estimate."
+    )
+    return {"task": task_to_dict(task), "energy_required": task.task_energy_level or state["energy"],
+            "energy_available": state["energy"], "stress_level": state["stress"],
+            "completion_probability": probability, "recommendation": recommendation}
 
 
 @app.put("/tasks/{task_id}")
@@ -1214,6 +1275,15 @@ def respond_to_task(
         task.end_notified = False
     else:
         task.status = user_response
+        if user_response == "completed":
+            # Completion remains valid after the planned window; record the
+            # lateness for future routine analysis instead of rejecting it.
+            task.completed_at = datetime.utcnow()
+            scheduled_end = task.expected_end_time or task.deadline
+            task.delay_duration_minutes = (
+                max(0.0, (task.completed_at - scheduled_end).total_seconds() / 60)
+                if scheduled_end else 0.0
+            )
 
     db.commit()
     db.refresh(task)
@@ -2097,6 +2167,15 @@ def is_explicit_scheduling_request(message: str) -> bool:
     ))
 
 
+def clean_orbit_answer(answer: str) -> str:
+    """Keep private scoring inputs out of the conversational reply."""
+    value = (answer or "").strip()
+    value = re.sub(r"(?:inferred|current)\s+(?:energy|stress)\s*\d+(?:\.\d+)?\s*/\s*10\s*,?\s*", "", value, flags=re.I)
+    value = re.sub(r"\b(?:planned|completed)\s+\d+\s*(?:min|minutes)\s*,?\s*", "", value, flags=re.I)
+    value = re.sub(r"\boverdue tasks\s*\d+\.?\s*", "", value, flags=re.I)
+    return re.sub(r"\s{2,}", " ", value).strip()
+
+
 def build_orbit_safe_fallback(
     current_user: User,
     db: Session,
@@ -2252,6 +2331,7 @@ def coach_message(
             assemble_orbit_context(current_user, db, message, data.client_time, data.time_zone, session.id),
             safe_fallback,
         )
+        response["answer"] = clean_orbit_answer(response["answer"])
         response["ai_mode"] = "live"
     except HTTPException as error:
         if error.status_code < 500:
@@ -2270,6 +2350,19 @@ def coach_message(
     db.commit()
     response["session_id"] = session.id
     return response
+
+
+@app.post("/users/me/coach/tasks")
+def create_task_from_coach(
+    data: CoachTaskActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The chat confirmation action persists a plan through the normal task contract."""
+    if not data.confirmed:
+        raise HTTPException(status_code=400, detail="Confirm the schedule before Orbit adds it to your plan")
+    task = create_task(data=data, current_user=current_user, db=db)
+    return {"message": "Task scheduled from Ask Orbit", "task": task}
 
 
 @app.post("/users/me/coach/sessions")
@@ -2522,14 +2615,18 @@ def task_to_dict(task: Task):
         "status": task.status,
         "priority": task.priority,
         "task_difficulty": task.task_difficulty,
-        "predictions": {
+            "predictions": {
             "productivity_score": task.predicted_productivity_score,
             "burnout_level": task.predicted_burnout_level,
             "task_priority": task.predicted_task_priority,
             "task_completion": task.predicted_task_completion,
-        },
+            },
+            "current_energy_level": task.task_energy_level,
+            "current_stress_level": task.task_stress_level,
         "user_reason": task.user_reason,
         "rescheduled_time": task.rescheduled_time,
+        "completed_at": task.completed_at,
+        "delay_duration_minutes": task.delay_duration_minutes,
         "start_notified": task.start_notified,
         "end_notified": task.end_notified,
         "created_at": task.created_at,

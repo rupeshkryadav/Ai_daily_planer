@@ -97,11 +97,17 @@ class Task(Base):
     predicted_burnout_level = Column(Float, nullable=True)
     predicted_task_priority = Column(String(20), nullable=True)
     predicted_task_completion = Column(String(20), nullable=True)
+    # A planning snapshot belongs to the task rather than the mutable profile.
+    task_energy_level = Column(Float, nullable=True)
+    task_stress_level = Column(Float, nullable=True)
 
     user_reason = Column(Text, nullable=True)
     next_action = Column(Text, nullable=True)
 
     rescheduled_time = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    # Positive number of minutes completed after the allocated end time.
+    delay_duration_minutes = Column(Float, nullable=True)
 
     start_notified = Column(Boolean, default=False)
     end_notified = Column(Boolean, default=False)
