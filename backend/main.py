@@ -631,10 +631,10 @@ def request_password_reset(data: PasswordResetRequest, db: Session = Depends(get
     except (OSError, smtplib.SMTPException) as error:
         print(f"Password-reset email delivery failed: {error}")
         delivered = False
-    # No SMTP provider is required for local development; production never
-    # exposes the token and instead relies on the configured email service.
-    if not delivered and os.getenv("APP_ENV", "development").lower() != "production":
-        response["reset_token"] = reset_token
+    if not delivered:
+        # Never tell a user an email was sent when SMTP is absent or failed.
+        # A production deployment needs SMTP_HOST/SMTP_FROM credentials.
+        raise HTTPException(status_code=503, detail="Password-reset email delivery is not configured. Please contact support or configure the email service.")
     return response
 
 
@@ -865,6 +865,7 @@ def occupied_schedule_blocks(
     available_from: datetime,
     deadline: datetime,
     db: Session,
+    exclude_task_id: Optional[int] = None,
 ) -> list[dict]:
     """Return planned task and routine blocks that overlap a requested window."""
     blocks = []
@@ -880,6 +881,8 @@ def occupied_schedule_blocks(
         .order_by(Task.scheduled_time.asc())
         .all()
     )
+    if exclude_task_id is not None:
+        planned_tasks = [task for task in planned_tasks if task.id != exclude_task_id]
     for planned in planned_tasks:
         blocks.append({"start": planned.scheduled_time, "end": planned.expected_end_time, "label": planned.title, "kind": "task"})
 
@@ -906,6 +909,7 @@ def find_free_task_slot(
     duration_minutes: int,
     db: Session,
     activity_title: str = "",
+    exclude_task_id: Optional[int] = None,
 ) -> Optional[datetime]:
     """Return a free gap, keeping workouts out of unsafe midday/late-night hours."""
     candidate = available_from
@@ -919,7 +923,7 @@ def find_free_task_slot(
         # Running/workouts belong in morning or early evening, never 12–15 or 23–05.
         return physical_activity_window_is_safe(start, duration_minutes)
 
-    for block in occupied_schedule_blocks(user_id, available_from, deadline, db):
+    for block in occupied_schedule_blocks(user_id, available_from, deadline, db, exclude_task_id):
         if candidate + timedelta(minutes=duration_minutes) <= block["start"] and activity_fits(candidate):
             return candidate
         if block["end"] > candidate:
@@ -932,7 +936,7 @@ def find_free_task_slot(
         while cursor + timedelta(minutes=duration_minutes) <= deadline:
             if activity_fits(cursor) and not any(
                 cursor < block["end"] and cursor + timedelta(minutes=duration_minutes) > block["start"]
-                for block in occupied_schedule_blocks(user_id, cursor, cursor + timedelta(minutes=duration_minutes), db)
+                for block in occupied_schedule_blocks(user_id, cursor, cursor + timedelta(minutes=duration_minutes), db, exclude_task_id)
             ):
                 return cursor
             cursor += timedelta(minutes=15)
@@ -1232,6 +1236,7 @@ def respond_to_task(
     user_response: str,
     notes: Optional[str] = None,
     reschedule_time: Optional[datetime] = None,
+    reschedule_end_time: Optional[datetime] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1263,20 +1268,23 @@ def respond_to_task(
     task.user_reason = notes
 
     if user_response == "rescheduled":
-        if not reschedule_time:
+        if not reschedule_time or not reschedule_end_time:
             raise HTTPException(
                 status_code=400,
-                detail="New time is required for rescheduling",
+                detail="Choose an available start and end window before rescheduling",
             )
-
-        duration = None
-        if task.expected_end_time:
-            duration = task.expected_end_time - task.scheduled_time
-
-        task.rescheduled_time = reschedule_time
-        task.scheduled_time = reschedule_time
-        if duration and duration.total_seconds() > 0:
-            task.expected_end_time = reschedule_time + duration
+        new_start, new_end = reschedule_time.replace(tzinfo=None), reschedule_end_time.replace(tzinfo=None)
+        duration_minutes = task.duration_minutes or max(1, round(((task.expected_end_time or task.scheduled_time) - task.scheduled_time).total_seconds() / 60))
+        if new_end <= new_start or new_start + timedelta(minutes=duration_minutes) > new_end:
+            raise HTTPException(status_code=400, detail="The task duration must fit inside the new available window")
+        allocated_start = find_free_task_slot(
+            current_user.id, new_start, new_end, duration_minutes, db, task.title, exclude_task_id=task.id
+        )
+        if not allocated_start:
+            raise HTTPException(status_code=409, detail="No free slot of this length exists in the selected window. Choose another window.")
+        task.rescheduled_time = allocated_start
+        task.scheduled_time, task.deadline = allocated_start, new_end
+        task.expected_end_time = allocated_start + timedelta(minutes=duration_minutes)
 
         # A rescheduled task is still unfinished. Keep it visible in the
         # active schedule and allow its notifications to fire again.
@@ -2191,14 +2199,27 @@ def parse_chat_schedule(message: str, now: datetime) -> dict:
     text = message.strip()
     duration_match = re.search(r"\b(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
     relative_match = re.search(r"\b(?:in|within|over)\s+(?:the\s+)?next\s+(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
-    title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|$)", text, re.I)
+    title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|\s+at\s+\d|$)", text, re.I)
+    if not title_match:
+        title_match = re.search(r"\b(?:i\s+(?:want|need|would like)\s+to|want\s+to|need\s+to)\s+(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|$)", text, re.I)
     title = title_match.group(1).strip(" .,!?") if title_match else ""
     # Remove a harmless leading article while retaining the user's task name.
     title = re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
     duration = int(duration_match.group(1)) if duration_match else None
     window_minutes = int(relative_match.group(1)) if relative_match else None
+    clock_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text, re.I)
+    start = now if window_minutes else None
+    if clock_match:
+        hour, minute = int(clock_match.group(1)), int(clock_match.group(2) or 0)
+        meridiem = (clock_match.group(3) or "").lower()
+        if meridiem == "pm" and hour < 12: hour += 12
+        if meridiem == "am" and hour == 12: hour = 0
+        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if start <= now:
+            start += timedelta(days=1)
+    end = start + timedelta(minutes=window_minutes) if window_minutes else (start + timedelta(minutes=duration) if clock_match and duration else None)
     return {"title": title, "duration": duration, "window_minutes": window_minutes,
-            "start": now, "end": now + timedelta(minutes=window_minutes) if window_minutes else None}
+            "start": start, "end": end}
 
 
 def schedule_missing_details(parsed: dict) -> list[str]:
@@ -2214,6 +2235,15 @@ def schedule_missing_details(parsed: dict) -> list[str]:
 
 def is_schedule_confirmation(message: str) -> bool:
     return bool(re.fullmatch(r"\s*(?:confirm|yes|yes,?\s*(?:please|schedule it)?|go ahead|schedule it)\s*[.!]?\s*", message, re.I))
+
+
+def merge_chat_schedule(previous_message: str, current_message: str, now: datetime) -> dict:
+    """Keep a natural multi-turn scheduling request together."""
+    first, second = parse_chat_schedule(previous_message, now), parse_chat_schedule(current_message, now)
+    merged = {key: second.get(key) or first.get(key) for key in ("title", "duration", "window_minutes", "start", "end")}
+    if merged["duration"] and merged["end"] is None and merged["start"]:
+        merged["end"] = merged["start"] + timedelta(minutes=merged["duration"])
+    return merged
 
 
 def build_orbit_safe_fallback(
@@ -2360,15 +2390,20 @@ def coach_message(
             db.add(session)
             db.flush()
     local_now = user_local_now(data.client_time, data.time_zone)
+    recent_user_messages = db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "user"
+    ).order_by(CoachMessage.created_at.desc()).limit(4).all()
+    recent_assistant = db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "assistant"
+    ).order_by(CoachMessage.created_at.desc()).first()
+    prior_schedule_text = " ".join(item.content for item in reversed(recent_user_messages))
+    continuing_schedule = bool(recent_assistant and "I can schedule" in recent_assistant.content)
     # Scheduling is deliberately deterministic: collect all three required
     # fields, show the exact window, then persist only after confirmation.
     pending_request = None
     if is_schedule_confirmation(message):
-        previous = db.query(CoachMessage).filter(
-            CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "user"
-        ).order_by(CoachMessage.created_at.desc()).first()
-        if previous:
-            pending_request = parse_chat_schedule(previous.content, local_now)
+        if prior_schedule_text:
+            pending_request = merge_chat_schedule(prior_schedule_text, "", local_now)
         if not pending_request or schedule_missing_details(pending_request):
             answer = "I don’t have a complete schedule to confirm yet. Tell me the task, duration, and preferred window."
         else:
@@ -2388,8 +2423,8 @@ def coach_message(
         session.preview, session.updated_at = answer[:255], datetime.utcnow()
         db.commit()
         return {"answer": answer, "session_id": session.id, "ai_mode": "schedule clarification"}
-    if is_explicit_scheduling_request(message):
-        parsed = parse_chat_schedule(message, local_now)
+    if is_explicit_scheduling_request(message) or continuing_schedule:
+        parsed = merge_chat_schedule(prior_schedule_text, message, local_now) if continuing_schedule else parse_chat_schedule(message, local_now)
         missing = schedule_missing_details(parsed)
         if missing:
             answer = f"I can schedule that. Please share {', '.join(missing)}."
