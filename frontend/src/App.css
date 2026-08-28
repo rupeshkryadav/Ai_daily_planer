@@ -55,6 +55,8 @@ select:focus { border-color: #829d72; box-shadow: 0 0 0 3px #e5eedf; }
 .checkin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px 0; }
 .checkin-grid span { background: #f3f5ef; border-radius: 7px; padding: 9px; display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: #666276; }
 .checkin-grid b { color: #3f5938; text-align: right; }
+/* Mood, energy and stress are session inputs in the planner, not locked profile facts. */
+.profile-summary .checkin-grid span:nth-last-child(-n+3) { display: none; }
 .routine-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, .85fr); gap: 18px; }
 .routine-intro { margin: 10px 0 -2px; max-width: 620px; }
 .routine-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

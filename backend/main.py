@@ -650,6 +650,8 @@ def confirm_password_reset(data: PasswordResetConfirmRequest, db: Session = Depe
     if not user:
         raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
     decode_password_reset_token(data.token, user)
+    if verify_password(data.new_password, user.password_hash or "") or verify_legacy_password(data.new_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="You cannot use your previous password. Please choose a new one.")
     user.password_hash = hash_password(data.new_password)
     user.hashed_password = None
     db.commit()
@@ -1197,6 +1199,14 @@ def update_task(
         task.priority = priority
     if data.task_difficulty is not None:
         task.task_difficulty = normalized_task_difficulty(data.task_difficulty, current_user)
+    # A metadata-only update must never reject an existing task because its
+    # original planning window is now in the past or no longer perfectly fits.
+    has_schedule_change = any(value is not None for value in (data.start_time, data.end_time, data.duration_minutes))
+    if not has_schedule_change:
+        store_task_prediction(task, current_user, db)
+        db.commit()
+        db.refresh(task)
+        return task_to_dict(task)
     start = data.start_time.replace(tzinfo=None) if data.start_time else task.scheduled_time
     deadline = data.end_time.replace(tzinfo=None) if data.end_time else task.deadline
     duration = data.duration_minutes if data.duration_minutes is not None else task.duration_minutes
@@ -2176,6 +2186,36 @@ def clean_orbit_answer(answer: str) -> str:
     return re.sub(r"\s{2,}", " ", value).strip()
 
 
+def parse_chat_schedule(message: str, now: datetime) -> dict:
+    """Extract only explicit schedule details; never invent missing slots."""
+    text = message.strip()
+    duration_match = re.search(r"\b(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
+    relative_match = re.search(r"\b(?:in|within|over)\s+(?:the\s+)?next\s+(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
+    title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|$)", text, re.I)
+    title = title_match.group(1).strip(" .,!?") if title_match else ""
+    # Remove a harmless leading article while retaining the user's task name.
+    title = re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
+    duration = int(duration_match.group(1)) if duration_match else None
+    window_minutes = int(relative_match.group(1)) if relative_match else None
+    return {"title": title, "duration": duration, "window_minutes": window_minutes,
+            "start": now, "end": now + timedelta(minutes=window_minutes) if window_minutes else None}
+
+
+def schedule_missing_details(parsed: dict) -> list[str]:
+    missing = []
+    if not parsed["title"]:
+        missing.append("the task title")
+    if not parsed["duration"]:
+        missing.append("how long it should take")
+    if not parsed["end"]:
+        missing.append("a preferred time window")
+    return missing
+
+
+def is_schedule_confirmation(message: str) -> bool:
+    return bool(re.fullmatch(r"\s*(?:confirm|yes|yes,?\s*(?:please|schedule it)?|go ahead|schedule it)\s*[.!]?\s*", message, re.I))
+
+
 def build_orbit_safe_fallback(
     current_user: User,
     db: Session,
@@ -2320,6 +2360,49 @@ def coach_message(
             db.add(session)
             db.flush()
     local_now = user_local_now(data.client_time, data.time_zone)
+    # Scheduling is deliberately deterministic: collect all three required
+    # fields, show the exact window, then persist only after confirmation.
+    pending_request = None
+    if is_schedule_confirmation(message):
+        previous = db.query(CoachMessage).filter(
+            CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "user"
+        ).order_by(CoachMessage.created_at.desc()).first()
+        if previous:
+            pending_request = parse_chat_schedule(previous.content, local_now)
+        if not pending_request or schedule_missing_details(pending_request):
+            answer = "I don’t have a complete schedule to confirm yet. Tell me the task, duration, and preferred window."
+        else:
+            task = create_task(
+                data=TaskCreateRequest(title=pending_request["title"], start_time=pending_request["start"],
+                    end_time=pending_request["end"], duration_minutes=pending_request["duration"]),
+                current_user=current_user, db=db,
+            )
+            answer = f"Done — I added ‘{task['title']}’ to your plan for the next {pending_request['window_minutes']} minutes."
+            db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
+            db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=answer))
+            session.preview, session.updated_at = answer[:255], datetime.utcnow()
+            db.commit()
+            return {"answer": answer, "task_created": task, "session_id": session.id, "ai_mode": "schedule action"}
+        db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
+        db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=answer))
+        session.preview, session.updated_at = answer[:255], datetime.utcnow()
+        db.commit()
+        return {"answer": answer, "session_id": session.id, "ai_mode": "schedule clarification"}
+    if is_explicit_scheduling_request(message):
+        parsed = parse_chat_schedule(message, local_now)
+        missing = schedule_missing_details(parsed)
+        if missing:
+            answer = f"I can schedule that. Please share {', '.join(missing)}."
+        else:
+            answer = (
+                f"I can schedule ‘{parsed['title']}’ for {parsed['duration']} minutes within the next "
+                f"{parsed['window_minutes']} minutes. Reply “confirm” and I’ll add it to your plan."
+            )
+        db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
+        db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=answer))
+        session.preview, session.updated_at = answer[:255], datetime.utcnow()
+        db.commit()
+        return {"answer": answer, "session_id": session.id, "ai_mode": "schedule clarification"}
     context = build_second_mind_context(current_user, db, local_now)
     response = second_mind_response(context, message)
     response["today_state"] = context["today_state"]
