@@ -624,17 +624,18 @@ def request_password_reset(data: PasswordResetRequest, db: Session = Depends(get
     if not user:
         return response
     reset_token = create_password_reset_token(user)
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    # A deployed API must never email a localhost link when FRONTEND_URL was
+    # accidentally omitted from its environment.
+    frontend_url = os.getenv("FRONTEND_URL", "https://ai-daily-planer.vercel.app").rstrip("/")
     reset_url = f"{frontend_url}/reset-password?token={reset_token}"
     try:
         delivered = send_password_reset_email(user.email, reset_url)
-    except (OSError, smtplib.SMTPException) as error:
+    except (OSError, smtplib.SMTPException, urllib.error.HTTPError, urllib.error.URLError) as error:
         print(f"Password-reset email delivery failed: {error}")
         delivered = False
     if not delivered:
-        # Never tell a user an email was sent when SMTP is absent or failed.
-        # A production deployment needs SMTP_HOST/SMTP_FROM credentials.
-        raise HTTPException(status_code=503, detail="Password-reset email delivery is not configured. Please contact support or configure the email service.")
+        # Never claim delivery when the provider is absent or failed.
+        raise HTTPException(status_code=503, detail="Password-reset email is temporarily unavailable. Please try again shortly.")
     return response
 
 
@@ -673,7 +674,23 @@ def decode_password_reset_token(token: str, user: User) -> None:
 
 
 def send_password_reset_email(email: str, reset_url: str) -> bool:
-    """Send through SMTP when configured; development can use the returned link."""
+    """Send a reset link through Resend or a configured SMTP provider."""
+    resend_key = os.getenv("RESEND_API_KEY", "").strip()
+    resend_sender = os.getenv("RESEND_FROM", os.getenv("EMAIL_FROM", "")).strip()
+    if resend_key and resend_sender:
+        payload = json.dumps({
+            "from": resend_sender,
+            "to": [email],
+            "subject": "Reset your Orbitday password",
+            "text": f"Use this link within 30 minutes to reset your Orbitday password:\n\n{reset_url}",
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            "https://api.resend.com/emails", data=payload, method="POST",
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return 200 <= response.status < 300
+
     host = os.getenv("SMTP_HOST", "").strip()
     sender = os.getenv("SMTP_FROM", "").strip()
     if not host or not sender:
@@ -944,9 +961,9 @@ def find_free_task_slot(
 
 
 def physical_activity_window_is_safe(start: datetime, duration_minutes: int) -> bool:
-    """Physical sessions belong to a same-day morning or early-evening block."""
+    """Protect the explicitly excluded midday and late-night windows only."""
     end = start + timedelta(minutes=duration_minutes)
-    return (5 <= start.hour < 12 or 17 <= start.hour < 22) and end.date() == start.date()
+    return (5 <= start.hour < 12 or 15 <= start.hour < 23) and end.date() == start.date()
 
 
 def is_physical_activity(title: str) -> bool:
@@ -972,7 +989,7 @@ def schedule_advice(
     completion_probability = completion_probability_for_insights(insights, data.current_energy_level, data.current_stress_level)
     if is_physical_activity(data.title) and not physical_activity_window_is_safe(available_from, data.duration_minutes):
         suggestion = find_free_task_slot(current_user.id, available_from, deadline, data.duration_minutes, db, data.title)
-        return {"has_conflict": True, "message": "Physical activities are protected from 12–3 PM and 11 PM–5 AM. Choose a morning or early-evening gap.", "suggested_start": suggestion, "suggested_end": suggestion + timedelta(minutes=data.duration_minutes) if suggestion else None, "conflicts": [], "completion_probability": completion_probability}
+        return {"has_conflict": True, "message": "Physical activities are protected from 12–3 PM and 11 PM–5 AM. Choose another available time.", "suggested_start": suggestion, "suggested_end": suggestion + timedelta(minutes=data.duration_minutes) if suggestion else None, "conflicts": [], "completion_probability": completion_probability}
 
     conflicts = [
         block for block in occupied_schedule_blocks(current_user.id, available_from, requested_end, db)
@@ -1042,7 +1059,7 @@ def create_task(
     if available_from + timedelta(minutes=duration_minutes) > deadline:
         raise HTTPException(status_code=400, detail="Duration must fit inside the available time window")
     if is_physical_activity(final_title) and not physical_activity_window_is_safe(available_from, duration_minutes):
-        raise HTTPException(status_code=400, detail="Physical activities must be scheduled in a morning or early-evening window, not 12–3 PM or 11 PM–5 AM.")
+        raise HTTPException(status_code=400, detail="Physical activities cannot be scheduled from 12–3 PM or 11 PM–5 AM.")
 
     final_priority = final_priority.lower().strip()
     if final_priority not in {"low", "medium", "high"}:
@@ -1175,11 +1192,13 @@ def task_insight(task_id: int, current_user: User = Depends(get_current_user), d
     workload = state["planned_minutes"]
     fit = "fits well" if probability >= 70 else "may be challenging" if probability >= 45 else "is best kept lighter or moved"
     recommendation = (
-        f"This task {fit} today. "
-        f"Your current plan has {workload} minutes scheduled, with energy and stress signals considered in the estimate."
+        f"This task {fit} today. Your current plan has {workload} minutes scheduled."
+        if task.task_energy_level is None and task.task_stress_level is None else
+        f"This task {fit} today. Your current plan has {workload} minutes scheduled, with the check-in values you supplied considered in the estimate."
     )
-    return {"task": task_to_dict(task), "energy_required": task.task_energy_level or state["energy"],
-            "energy_available": state["energy"], "stress_level": state["stress"],
+    return {"task": task_to_dict(task), "energy_required": task.task_energy_level,
+            "energy_available": state["energy"] if task.task_energy_level is not None else None,
+            "stress_level": task.task_stress_level,
             "completion_probability": probability, "recommendation": recommendation}
 
 
@@ -2197,17 +2216,29 @@ def clean_orbit_answer(answer: str) -> str:
 def parse_chat_schedule(message: str, now: datetime) -> dict:
     """Extract only explicit schedule details; never invent missing slots."""
     text = message.strip()
-    duration_match = re.search(r"\b(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
-    relative_match = re.search(r"\b(?:in|within|over)\s+(?:the\s+)?next\s+(\d+)\s*(?:minutes?|mins?|min)\b", text, re.I)
-    title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|\s+at\s+\d|$)", text, re.I)
+    duration_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b", text, re.I)
+    relative_match = re.search(r"\b(?:in|within|over)\s+(?:the\s+)?next\s+(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b", text, re.I)
+    title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|hr|minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|\s+at\s+\d|$)", text, re.I)
     if not title_match:
         title_match = re.search(r"\b(?:i\s+(?:want|need|would like)\s+to|want\s+to|need\s+to)\s+(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|$)", text, re.I)
     title = title_match.group(1).strip(" .,!?") if title_match else ""
     # Remove a harmless leading article while retaining the user's task name.
     title = re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
-    duration = int(duration_match.group(1)) if duration_match else None
-    window_minutes = int(relative_match.group(1)) if relative_match else None
+    if title.lower() in {"task", "a task", "the task", "it", "this"}:
+        title = ""
+    duration = None
+    if duration_match:
+        amount = float(duration_match.group(1))
+        duration = round(amount * 60) if duration_match.group(2).lower().startswith(("h",)) else round(amount)
+    window_minutes = None
+    if relative_match:
+        window_amount = float(relative_match.group(1))
+        window_minutes = round(window_amount * 60) if relative_match.group(2).lower().startswith("h") else round(window_amount)
     clock_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text, re.I)
+    if not clock_match:
+        # A follow-up such as "12:15" is a valid answer to Orbit's time
+        # question; it should not be discarded just because it omits "at".
+        clock_match = re.fullmatch(r"\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*[.!]?\s*", text, re.I)
     start = now if window_minutes else None
     if clock_match:
         hour, minute = int(clock_match.group(1)), int(clock_match.group(2) or 0)
@@ -2229,7 +2260,7 @@ def schedule_missing_details(parsed: dict) -> list[str]:
     if not parsed["duration"]:
         missing.append("how long it should take")
     if not parsed["end"]:
-        missing.append("a preferred time window")
+        missing.append("an exact start time or available time window")
     return missing
 
 
@@ -2427,11 +2458,19 @@ def coach_message(
         parsed = merge_chat_schedule(prior_schedule_text, message, local_now) if continuing_schedule else parse_chat_schedule(message, local_now)
         missing = schedule_missing_details(parsed)
         if missing:
-            answer = f"I can schedule that. Please share {', '.join(missing)}."
-        else:
             answer = (
-                f"I can schedule ‘{parsed['title']}’ for {parsed['duration']} minutes within the next "
-                f"{parsed['window_minutes']} minutes. Reply “confirm” and I’ll add it to your plan."
+                "I can schedule that. Please share " + ", ".join(missing) + ". "
+                "I’ll keep energy, stress, priority, and difficulty unchanged unless you choose to provide them."
+            )
+        else:
+            timing = (
+                f"at {format_orbit_datetime(parsed['start'])}"
+                if parsed["window_minutes"] is None else
+                f"within the next {parsed['window_minutes']} minutes"
+            )
+            answer = (
+                f"I can schedule ‘{parsed['title']}’ for {parsed['duration']} minutes {timing}. "
+                "Reply “confirm” and I’ll add it to your plan."
             )
         db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
         db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=answer))

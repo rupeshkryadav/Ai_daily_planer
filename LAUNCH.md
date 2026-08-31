@@ -8,6 +8,11 @@
    - `TOKEN_SECRET` — a long random value.
    - `GEMINI_API_KEY` — an API key from Google AI Studio with Gemini API access.
    - `ORBIT_AI_MODEL=gemini-2.5-flash` (optional; this is the default).
+   - `FRONTEND_URL=https://ai-daily-planer.vercel.app`.
+   - A password-reset email provider. The simplest option is Resend:
+     `RESEND_API_KEY`, plus `RESEND_FROM` set to a verified sender address.
+     Existing SMTP settings also remain supported: `SMTP_HOST`, `SMTP_PORT`,
+     `SMTP_FROM`, `SMTP_USERNAME`, and `SMTP_PASSWORD`.
 3. Redeploy the backend after saving the variables.
 
 `GEMINI_API_KEY` stays on the server. It must not be added to Vercel variables, committed to Git, or placed in frontend source files.
