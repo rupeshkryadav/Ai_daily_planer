@@ -5,8 +5,6 @@ import os
 import re
 import urllib.error
 import urllib.request
-import smtplib
-from email.message import EmailMessage
 from dotenv import load_dotenv
 
 # Local development reads backend/.env; production platforms provide the same
@@ -275,15 +273,6 @@ class LoginRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
-
-
-class PasswordResetRequest(BaseModel):
-    email: EmailStr
-
-
-class PasswordResetConfirmRequest(BaseModel):
-    token: str = Field(min_length=20)
-    new_password: str = Field(min_length=8)
 
 
 class ProfileUpdate(BaseModel):
@@ -603,111 +592,6 @@ def update_profile(
     db.refresh(current_user)
     return {"message": "Profile updated", "user": get_me(current_user)}
 
-
-def create_password_reset_token(user: User) -> str:
-    """Create a short-lived reset token invalidated when the password changes."""
-    payload = {
-        "user_id": user.id,
-        "exp": int((datetime.utcnow() + timedelta(minutes=30)).timestamp()),
-        "password_version": hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16],
-    }
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
-    signature = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
-
-
-@app.post("/password-reset/request")
-def request_password_reset(data: PasswordResetRequest, db: Session = Depends(get_db)):
-    """Send a reset link without revealing whether the email has an account."""
-    user = db.query(User).filter(User.email == data.email.strip().lower()).first()
-    response = {"message": "If an Orbitday account exists for that email, a reset link has been sent."}
-    if not user:
-        return response
-    reset_token = create_password_reset_token(user)
-    # A deployed API must never email a localhost link when FRONTEND_URL was
-    # accidentally omitted from its environment.
-    frontend_url = os.getenv("FRONTEND_URL", "https://ai-daily-planer.vercel.app").rstrip("/")
-    reset_url = f"{frontend_url}/reset-password?token={reset_token}"
-    try:
-        delivered = send_password_reset_email(user.email, reset_url)
-    except (OSError, smtplib.SMTPException, urllib.error.HTTPError, urllib.error.URLError) as error:
-        print(f"Password-reset email delivery failed: {error}")
-        delivered = False
-    if not delivered:
-        # Never claim delivery when the provider is absent or failed.
-        raise HTTPException(status_code=503, detail="Password-reset email is temporarily unavailable. Please try again shortly.")
-    return response
-
-
-@app.post("/password-reset/confirm")
-def confirm_password_reset(data: PasswordResetConfirmRequest, db: Session = Depends(get_db)):
-    try:
-        encoded = data.token.split(".", 1)[0]
-        payload = json.loads(base64.urlsafe_b64decode(encoded.encode()).decode())
-        user_id = int(payload["user_id"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
-    decode_password_reset_token(data.token, user)
-    if verify_password(data.new_password, user.password_hash or "") or verify_legacy_password(data.new_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="You cannot use your previous password. Please choose a new one.")
-    user.password_hash = hash_password(data.new_password)
-    user.hashed_password = None
-    db.commit()
-    return {"message": "Password reset. You can now sign in with your new password."}
-
-
-def decode_password_reset_token(token: str, user: User) -> None:
-    try:
-        encoded, signature = token.split(".", 1)
-        expected = hmac.new(TOKEN_SECRET.encode(), f"reset.{encoded}".encode(), hashlib.sha256).hexdigest()
-        payload = json.loads(base64.urlsafe_b64decode(encoded.encode()).decode())
-        valid_version = hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16]
-        if (not hmac.compare_digest(signature, expected) or payload.get("user_id") != user.id
-                or payload.get("password_version") != valid_version
-                or payload.get("exp", 0) < int(datetime.utcnow().timestamp())):
-            raise ValueError("invalid reset token")
-    except Exception:
-        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
-
-
-def send_password_reset_email(email: str, reset_url: str) -> bool:
-    """Send a reset link through Resend or a configured SMTP provider."""
-    resend_key = os.getenv("RESEND_API_KEY", "").strip()
-    resend_sender = os.getenv("RESEND_FROM", os.getenv("EMAIL_FROM", "")).strip()
-    if resend_key and resend_sender:
-        payload = json.dumps({
-            "from": resend_sender,
-            "to": [email],
-            "subject": "Reset your Orbitday password",
-            "text": f"Use this link within 30 minutes to reset your Orbitday password:\n\n{reset_url}",
-        }).encode("utf-8")
-        request = urllib.request.Request(
-            "https://api.resend.com/emails", data=payload, method="POST",
-            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return 200 <= response.status < 300
-
-    host = os.getenv("SMTP_HOST", "").strip()
-    sender = os.getenv("SMTP_FROM", "").strip()
-    if not host or not sender:
-        return False
-    message = EmailMessage()
-    message["Subject"] = "Reset your Orbitday password"
-    message["From"] = sender
-    message["To"] = email
-    message.set_content(f"Use this link within 30 minutes to reset your Orbitday password:\n\n{reset_url}")
-    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=15) as client:
-        if os.getenv("SMTP_STARTTLS", "true").lower() != "false":
-            client.starttls()
-        username, password = os.getenv("SMTP_USERNAME", ""), os.getenv("SMTP_PASSWORD", "")
-        if username:
-            client.login(username, password)
-        client.send_message(message)
-    return True
 
     db.commit()
     db.refresh(current_user)

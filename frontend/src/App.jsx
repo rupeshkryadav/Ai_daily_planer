@@ -27,11 +27,8 @@ const ROUTINE_META = {
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("token") || "");
   const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState(() => window.location.pathname === "/signup" ? "signup" : ["/reset-password", "/forgot-password"].includes(window.location.pathname) ? "reset" : "login");
+  const [authMode, setAuthMode] = useState(() => window.location.pathname === "/signup" ? "signup" : "login");
   const [credentials, setCredentials] = useState({ name: "", email: "", password: "" });
-  const [resetForm, setResetForm] = useState(() => ({ email: "", token: new URLSearchParams(window.location.search).get("token") || "", newPassword: "", confirmPassword: "" }));
-  const [resetRequested, setResetRequested] = useState(() => Boolean(new URLSearchParams(window.location.search).get("token")));
-  const [resetEmailSent, setResetEmailSent] = useState(false);
   const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(false);
   const [tasks, setTasks] = useState([]);
@@ -71,9 +68,6 @@ function App() {
   const [wrapUpOpen, setWrapUpOpen] = useState(false);
   const [routineReview, setRoutineReview] = useState("followed");
   const [wrapUpNotes, setWrapUpNotes] = useState("");
-  const resetTokenInUrl = new URLSearchParams(window.location.search).get("token");
-  const isForgotPassword = window.location.pathname === "/forgot-password";
-
   const headers = { headers: { Authorization: `Bearer ${token}` } };
   const activeTasks = useMemo(() => tasks.filter((task) => !["completed", "skipped"].includes(task.status)), [tasks]);
   const historyTasks = useMemo(() => tasks.filter((task) => ["completed", "skipped"].includes(task.status)), [tasks]);
@@ -89,15 +83,13 @@ function App() {
   useEffect(() => { requestNotifications(); }, []);
   useEffect(() => {
     const syncAuthScreen = () => {
-      setAuthMode(window.location.pathname === "/signup" ? "signup" : ["/reset-password", "/forgot-password"].includes(window.location.pathname) ? "reset" : "login");
-      const linkedToken = new URLSearchParams(window.location.search).get("token");
-      if (linkedToken) { setResetForm((previous) => ({ ...previous, token: linkedToken })); setResetRequested(true); }
+      setAuthMode(window.location.pathname === "/signup" ? "signup" : "login");
     };
     window.addEventListener("popstate", syncAuthScreen);
     return () => window.removeEventListener("popstate", syncAuthScreen);
   }, []);
   useEffect(() => {
-    if (!token && !["/login", "/signup", "/reset-password"].includes(window.location.pathname)) {
+    if (!token && !["/login", "/signup"].includes(window.location.pathname)) {
       window.history.replaceState({}, "", "/login");
     }
   }, [token]);
@@ -383,29 +375,6 @@ function App() {
     setPage("dashboard");
   };
 
-  const handlePasswordReset = async (event) => {
-    event.preventDefault();
-    setAuthError("");
-    setLoading(true);
-    try {
-      if (!resetRequested) {
-        await axios.post(`${API_BASE}/password-reset/request`, { email: resetForm.email });
-        setResetEmailSent(true);
-        setNotice("A reset link has been sent to your email. Please check your inbox.");
-      } else {
-        if (resetForm.newPassword !== resetForm.confirmPassword) throw new Error("Passwords do not match.");
-        await axios.post(`${API_BASE}/password-reset/confirm`, { token: resetForm.token, new_password: resetForm.newPassword });
-        setNotice("Password reset. Sign in with your new password.");
-        window.history.replaceState({}, "", "/login");
-        setAuthMode("login");
-        setResetRequested(false);
-        setResetForm({ email: "", token: "", newPassword: "", confirmPassword: "" });
-      }
-    } catch (error) {
-      setAuthError(error.response?.data?.detail || "We could not complete the password reset. Please try again.");
-    } finally { setLoading(false); }
-  };
-
   const logout = () => {
     localStorage.removeItem("token");
     setToken("");
@@ -573,7 +542,7 @@ function App() {
   if (!token) return (
     <main className="auth-shell">
       <section className="auth-hero"><div className="brand auth-brand">orbit<span>day</span></div><span className="brand-mark">◈</span><p className="eyebrow">YOUR PERSONAL OPERATING SYSTEM</p><h1>Make room for what matters.</h1><p>Plan focused days, learn from your routine, and build a life that feels intentional.</p><div className="hero-points"><span>✓ Private account history</span><span>✓ Adaptive coaching</span><span>✓ Thoughtful reminders</span></div></section>
-      <section className="auth-panel"><div className="auth-card"><h2>{authMode === "login" ? "Welcome back" : authMode === "signup" ? "Create your space" : "Reset your password"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : authMode === "signup" ? "Start with the essentials, then we’ll set up your routine." : resetRequested ? "Choose a new password for your account." : resetEmailSent ? "A reset link has been sent to your email. Please check your inbox." : isForgotPassword ? "We’ll email a secure reset link to your account." : "This reset link is missing or invalid. Request a new link from Forgot password."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}{authMode === "reset" ? (resetRequested ? <form onSubmit={handlePasswordReset}><label>New password<input type="password" minLength="8" value={resetForm.newPassword} onChange={(e) => setResetForm({ ...resetForm, newPassword: e.target.value })} placeholder="At least 8 characters" required autoFocus /></label><label>Confirm new password<input type="password" minLength="8" value={resetForm.confirmPassword} onChange={(e) => setResetForm({ ...resetForm, confirmPassword: e.target.value })} placeholder="Type it again" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : "Save new password"}</button></form> : isForgotPassword && !resetEmailSent ? <form onSubmit={handlePasswordReset}><label>Email address<input type="email" value={resetForm.email} onChange={(e) => setResetForm({ ...resetForm, email: e.target.value })} placeholder="you@example.com" required autoFocus /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : "Send reset link"}</button></form> : <button className="text-button" onClick={() => { window.history.pushState({}, "", "/forgot-password"); setAuthMode("reset"); setResetEmailSent(false); setAuthError(""); }}>Request a new reset link</button>) : <form onSubmit={handleAuth}>{authMode === "signup" && <label>Your name<input value={credentials.name} onChange={(e) => setCredentials({ ...credentials, name: e.target.value })} placeholder="What should we call you?" required autoFocus /></label>}<label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required autoFocus={authMode === "login"} /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Continue to setup"}</button></form>}{authMode === "login" && <button className="text-button" onClick={() => { window.history.pushState({}, "", "/forgot-password"); setAuthMode("reset"); setAuthError(""); setNotice(""); setResetEmailSent(false); }}>Forgot password?</button>}<button className="text-button" onClick={() => { const nextMode = authMode === "login" ? "signup" : "login"; window.history.pushState({}, "", `/${nextMode}`); setAuthMode(nextMode); setAuthError(""); setNotice(""); setResetRequested(false); setResetEmailSent(false); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
+      <section className="auth-panel"><div className="auth-card"><h2>{authMode === "login" ? "Welcome back" : "Create your space"}</h2><p>{authMode === "login" ? "Sign in to continue your routine." : "Start with the essentials, then we’ll set up your routine."}</p>{notice && <div className="notice success">{notice}</div>}{authError && <div className="notice error">{authError}</div>}<form onSubmit={handleAuth}>{authMode === "signup" && <label>Your name<input value={credentials.name} onChange={(e) => setCredentials({ ...credentials, name: e.target.value })} placeholder="What should we call you?" required autoFocus /></label>}<label>Email address<input type="email" value={credentials.email} onChange={(e) => setCredentials({ ...credentials, email: e.target.value })} placeholder="you@example.com" required autoFocus={authMode === "login"} /></label><label>Password<input type="password" minLength="6" value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} placeholder="At least 6 characters" required /></label><button className="primary-button" disabled={loading}>{loading ? "Please wait…" : authMode === "login" ? "Sign in" : "Continue to setup"}</button></form><button className="text-button" onClick={() => { const nextMode = authMode === "login" ? "signup" : "login"; window.history.pushState({}, "", `/${nextMode}`); setAuthMode(nextMode); setAuthError(""); setNotice(""); }}>{authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button></div></section>
     </main>
   );
 
