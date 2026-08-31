@@ -2220,6 +2220,8 @@ def parse_chat_schedule(message: str, now: datetime) -> dict:
     relative_match = re.search(r"\b(?:in|within|over)\s+(?:the\s+)?next\s+(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b", text, re.I)
     title_match = re.search(r"\b(?:schedule|plan|add)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?(.+?)(?=\s+for\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|hr|minutes?|mins?|min)|\s+(?:in|within|over)\s+(?:the\s+)?next\s+\d+|\s+at\s+\d|$)", text, re.I)
     if not title_match:
+        title_match = re.search(r"\b(?:task\s+)?named\s+(.+?)(?=\s+for\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|hr|minutes?|mins?|min)|\s+at\s+\d|$)", text, re.I)
+    if not title_match:
         title_match = re.search(r"\b(?:i\s+(?:want|need|would like)\s+to|want\s+to|need\s+to)\s+(.+?)(?=\s+for\s+\d+\s*(?:minutes?|mins?|min)|$)", text, re.I)
     title = title_match.group(1).strip(" .,!?") if title_match else ""
     # Remove a harmless leading article while retaining the user's task name.
@@ -2275,6 +2277,38 @@ def merge_chat_schedule(previous_message: str, current_message: str, now: dateti
     if merged["duration"] and merged["end"] is None and merged["start"]:
         merged["end"] = merged["start"] + timedelta(minutes=merged["duration"])
     return merged
+
+
+def merge_schedule_messages(messages: list[str], now: datetime) -> dict:
+    """Merge only the user replies belonging to the active schedule request."""
+    merged = {"title": "", "duration": None, "window_minutes": None, "start": None, "end": None}
+    for message in messages:
+        parsed = parse_chat_schedule(message, now)
+        for key, value in parsed.items():
+            if value is not None and value != "":
+                merged[key] = value
+    if merged["duration"] and merged["start"]:
+        # Exact clock time plus duration is an exact task window. Rebuild it
+        # after merging because details can arrive in separate replies.
+        if merged["window_minutes"] is None:
+            merged["end"] = merged["start"] + timedelta(minutes=merged["duration"])
+        elif merged["end"] is None:
+            merged["end"] = merged["start"] + timedelta(minutes=merged["window_minutes"])
+    return merged
+
+
+def active_schedule_user_messages(history: list[CoachMessage]) -> list[str]:
+    """Ignore completed schedules so a later confirmation cannot reuse them."""
+    last_completed = -1
+    for index, entry in enumerate(history):
+        if entry.role == "assistant" and entry.content.startswith("Done — I added"):
+            last_completed = index
+    start = last_completed + 1
+    # A new explicit schedule command replaces an unfinished draft too.
+    for index, entry in enumerate(history[start:], start=start):
+        if entry.role == "user" and is_explicit_scheduling_request(entry.content):
+            start = index
+    return [entry.content for entry in history[start:] if entry.role == "user"]
 
 
 def build_orbit_safe_fallback(
@@ -2421,20 +2455,21 @@ def coach_message(
             db.add(session)
             db.flush()
     local_now = user_local_now(data.client_time, data.time_zone)
-    recent_user_messages = db.query(CoachMessage).filter(
-        CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "user"
-    ).order_by(CoachMessage.created_at.desc()).limit(4).all()
+    recent_history = db.query(CoachMessage).filter(
+        CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id
+    ).order_by(CoachMessage.created_at.desc()).limit(30).all()
+    recent_history.reverse()
     recent_assistant = db.query(CoachMessage).filter(
         CoachMessage.user_id == current_user.id, CoachMessage.session_id == session.id, CoachMessage.role == "assistant"
     ).order_by(CoachMessage.created_at.desc()).first()
-    prior_schedule_text = " ".join(item.content for item in reversed(recent_user_messages))
+    schedule_messages = active_schedule_user_messages(recent_history)
     continuing_schedule = bool(recent_assistant and "I can schedule" in recent_assistant.content)
     # Scheduling is deliberately deterministic: collect all three required
     # fields, show the exact window, then persist only after confirmation.
     pending_request = None
     if is_schedule_confirmation(message):
-        if prior_schedule_text:
-            pending_request = merge_chat_schedule(prior_schedule_text, "", local_now)
+        if schedule_messages:
+            pending_request = merge_schedule_messages(schedule_messages, local_now)
         if not pending_request or schedule_missing_details(pending_request):
             answer = "I don’t have a complete schedule to confirm yet. Tell me the task, duration, and preferred window."
         else:
@@ -2443,7 +2478,12 @@ def coach_message(
                     end_time=pending_request["end"], duration_minutes=pending_request["duration"]),
                 current_user=current_user, db=db,
             )
-            answer = f"Done — I added ‘{task['title']}’ to your plan for the next {pending_request['window_minutes']} minutes."
+            timing = (
+                f"at {format_orbit_datetime(task['scheduled_time'])}"
+                if pending_request["window_minutes"] is None else
+                f"within the next {pending_request['window_minutes']} minutes"
+            )
+            answer = f"Done — I added ‘{task['title']}’ to your plan for {pending_request['duration']} minutes {timing}."
             db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="user", content=message))
             db.add(CoachMessage(user_id=current_user.id, session_id=session.id, role="assistant", content=answer))
             session.preview, session.updated_at = answer[:255], datetime.utcnow()
@@ -2455,7 +2495,13 @@ def coach_message(
         db.commit()
         return {"answer": answer, "session_id": session.id, "ai_mode": "schedule clarification"}
     if is_explicit_scheduling_request(message) or continuing_schedule:
-        parsed = merge_chat_schedule(prior_schedule_text, message, local_now) if continuing_schedule else parse_chat_schedule(message, local_now)
+        # A fresh "schedule ..." command replaces an earlier draft. Short
+        # follow-ups (duration/time/title) continue only the active draft.
+        parsed = (
+            parse_chat_schedule(message, local_now)
+            if is_explicit_scheduling_request(message)
+            else merge_schedule_messages([*schedule_messages, message], local_now)
+        )
         missing = schedule_missing_details(parsed)
         if missing:
             answer = (
