@@ -1770,6 +1770,14 @@ def second_mind_response(context: dict, request: str = "") -> dict:
     }
 
 
+def orbit_service_fallback(context: dict, message: str) -> str:
+    """Keep Ask Orbit useful when the external Gemini provider is unavailable."""
+    normalized = message.strip().lower()
+    if re.fullmatch(r"(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))[!. ]*", normalized):
+        return "Hi! I’m here to help you think through your day. What would you like to plan, prioritize, or reflect on?"
+    return second_mind_response(context, message)["answer"]
+
+
 def format_orbit_datetime(value: Optional[datetime]) -> str:
     """Return a compact, timezone-neutral timestamp for the model prompt."""
     return value.strftime("%a %d %b, %I:%M %p") if value else "not set"
@@ -2466,12 +2474,11 @@ def coach_message(
     except HTTPException as error:
         if error.status_code < 500:
             raise
-        if not scheduling_request:
-            # Do not turn a greeting into a made-up planning slot when Gemini
-            # is unavailable; expose the actionable provider failure instead.
-            raise HTTPException(status_code=error.status_code, detail=error.detail)
-        response["answer"] = safe_fallback
-        response["ai_mode"] = "schedule fallback"
+        # Gemini is an external dependency. Preserve a useful conversational
+        # experience during a transient provider/network outage instead of
+        # surfacing a dead-end error in the chat UI.
+        response["answer"] = safe_fallback if scheduling_request else orbit_service_fallback(context, message)
+        response["ai_mode"] = "schedule fallback" if scheduling_request else "local fallback"
     if session.title == "New chat":
         session.title = message[:80].strip() or "New chat"
     session.preview = response["answer"][:255]
