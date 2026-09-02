@@ -18,6 +18,15 @@ const displayDate = (value) => new Date(value).toLocaleString([], {
   weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
 });
 const dateOnly = (value) => value ? String(value).slice(0, 10) : "";
+const displayTime = (value) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const stressFeedback = (value) => {
+  const stress = Number(value || 5);
+  if (stress <= 2) return { emoji: "😌", label: "Relaxed / Peaceful", tone: "calm" };
+  if (stress <= 4) return { emoji: "🙂", label: "Doing Fine / Calm", tone: "steady" };
+  if (stress <= 6) return { emoji: "😐", label: "Neutral / Moderate", tone: "neutral" };
+  if (stress <= 8) return { emoji: "😓", label: "Stressed / Overwhelmed", tone: "stressed" };
+  return { emoji: "🤯", label: "Extremely Stressed / Burnout", tone: "burnout" };
+};
 const ESSENTIAL_ROUTINE = ["wake_up", "work_start", "lunch", "dinner", "sleep"];
 const ROUTINE_META = {
   wake_up: ["Wake up", "☀"], work_start: ["Start work / college", "▣"], lunch: ["Lunch", "◐"], dinner: ["Dinner", "◑"], sleep: ["Go to sleep", "◒"],
@@ -32,6 +41,8 @@ function App() {
   const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(false);
   const [tasks, setTasks] = useState([]);
+  const [todayRoutineEntries, setTodayRoutineEntries] = useState([]);
+  const [routineCompletion, setRoutineCompletion] = useState({});
   const [page, setPage] = useState("dashboard");
   const [form, setForm] = useState({ title: "", start: "", end: "", durationHours: "", durationMinutes: "", priority: "medium", taskDifficulty: "", currentEnergy: "", currentStress: "" });
   const [selectedTask, setSelectedTask] = useState(null);
@@ -68,11 +79,19 @@ function App() {
   const [wrapUpOpen, setWrapUpOpen] = useState(false);
   const [routineReview, setRoutineReview] = useState("followed");
   const [wrapUpNotes, setWrapUpNotes] = useState("");
+  const [wrapUpOutcomes, setWrapUpOutcomes] = useState({});
   const headers = { headers: { Authorization: `Bearer ${token}` } };
   const activeTasks = useMemo(() => tasks.filter((task) => !["completed", "skipped"].includes(task.status)), [tasks]);
   const historyTasks = useMemo(() => tasks.filter((task) => ["completed", "skipped"].includes(task.status)), [tasks]);
   const completedCount = historyTasks.filter((task) => task.status === "completed").length;
   const completionRate = historyTasks.length ? Math.round((completedCount / historyTasks.length) * 100) : 0;
+  const today = new Date().toISOString().slice(0, 10);
+  const todayTasks = useMemo(() => tasks.filter((task) => dateOnly(task.scheduled_time) === today), [tasks, today]);
+  const todaySchedule = useMemo(() => [
+    ...todayRoutineEntries.map((entry) => ({ id: entry.id, type: "routine", title: ROUTINE_META[entry.activity]?.[0] || entry.activity.replace(/^custom_/, "").replace(/_/g, " "), start: entry.occurred_at, end: null, status: routineCompletion[entry.id] ? "completed" : "scheduled" })),
+    ...todayTasks.map((task) => ({ id: task.id, type: "task", title: task.title, start: task.scheduled_time, end: task.expected_end_time, status: task.status })),
+  ].sort((a, b) => new Date(a.start) - new Date(b.start)), [todayRoutineEntries, todayTasks, routineCompletion]);
+  const hasPriorActivity = tasks.length > 0 || todayRoutineEntries.length > 0 || Boolean(user?.last_routine_completed_date);
 
   const requestNotifications = async () => {
     try {
@@ -173,7 +192,7 @@ function App() {
     const today = new Date().toISOString().slice(0, 10);
     const reviewKey = `orbit_daily_review_${user.id}_${today}`;
     const needsReview = tasks.some((task) => dateOnly(task.scheduled_time) === today && !["completed", "skipped"].includes(task.status));
-    if (needsReview && !localStorage.getItem(reviewKey)) setWrapUpOpen(true);
+    if (needsReview && !localStorage.getItem(reviewKey)) openWrapUp();
   }, [user, tasks]);
 
   const loadSession = async () => {
@@ -182,7 +201,7 @@ function App() {
       setUser(me.data);
       const saved = localStorage.getItem(storageKey(me.data.id));
       setTasks(saved ? JSON.parse(saved) : []);
-      await Promise.all([loadTasks(), loadCoaching(), loadDailyCheckIn()]);
+      await Promise.all([loadTasks(), loadCoaching(), loadDailyCheckIn(), loadTodayRoutine()]);
     } catch {
       logout();
       setAuthError("Your session expired. Please log in again.");
@@ -213,6 +232,22 @@ function App() {
     const sessionId = activeCoachSessionId || sessions[0]?.id;
     if (sessionId) await loadCoachMessages(sessionId);
   };
+
+  const loadTodayRoutine = async () => {
+    const todayDate = new Date().toISOString().slice(0, 10);
+    const result = await axios.get(`${API_BASE}/users/me/time-entries`, { params: { date: todayDate }, ...headers });
+    setTodayRoutineEntries(Array.isArray(result.data) ? result.data : []);
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    const saved = localStorage.getItem(`orbit_routine_completion_${user.id}_${today}`);
+    setRoutineCompletion(saved ? JSON.parse(saved) : {});
+  }, [user, today]);
+
+  useEffect(() => {
+    if (user) localStorage.setItem(`orbit_routine_completion_${user.id}_${today}`, JSON.stringify(routineCompletion));
+  }, [routineCompletion, user, today]);
 
   const loadCoachMessages = async (sessionId) => {
     setActiveCoachSessionId(sessionId);
@@ -460,18 +495,66 @@ function App() {
     }
   };
 
+  const setRoutineItemComplete = (entryId, completed) => {
+    setRoutineCompletion((previous) => ({ ...previous, [entryId]: completed }));
+  };
+
+  const completeDashboardItem = async (item) => {
+    if (item.type === "routine") return setRoutineItemComplete(item.id, item.status !== "completed");
+    if (item.status === "completed") return;
+    try {
+      const result = await axios.put(`${API_BASE}/tasks/${item.id}/respond`, null, {
+        params: { user_response: "completed", notes: "" }, ...headers,
+      });
+      setTasks((previous) => previous.map((task) => task.id === item.id ? result.data.task : task));
+    } catch (error) {
+      setNotice(error.response?.data?.detail || "Could not mark this task complete.");
+    }
+  };
+
+  const openWrapUp = () => {
+    const initialOutcomes = Object.fromEntries(todaySchedule.map((item) => [
+      `${item.type}:${item.id}`, item.status === "completed" ? "done" : "missed",
+    ]));
+    setWrapUpOutcomes(initialOutcomes);
+    setRoutineReview("followed");
+    setWrapUpOpen(true);
+  };
+
+  const selectRoutineReview = (value) => {
+    setRoutineReview(value);
+    if (value === "followed") {
+      setWrapUpOutcomes(Object.fromEntries(todaySchedule.map((item) => [`${item.type}:${item.id}`, "done"])));
+    } else if (value === "not_followed") {
+      setWrapUpOutcomes(Object.fromEntries(todaySchedule.map((item) => [
+        `${item.type}:${item.id}`, item.status === "completed" ? "done" : "missed",
+      ])));
+    }
+  };
+
   const saveWrapUp = async () => {
     try {
+      const itemOutcomes = todaySchedule.map((item) => ({
+        item_type: item.type,
+        item_id: item.id,
+        status: routineReview === "followed" ? "done" : (wrapUpOutcomes[`${item.type}:${item.id}`] || "missed"),
+      }));
       await axios.post(`${API_BASE}/users/me/daily-review`, {
         routine_status: routineReview,
         notes: wrapUpNotes,
+        item_outcomes: itemOutcomes,
         client_time: new Date().toISOString(),
         time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
       }, headers);
       const today = new Date().toISOString().slice(0, 10);
       localStorage.setItem(`orbit_daily_review_${user.id}_${today}`, "saved");
+      setRoutineCompletion((previous) => ({
+        ...previous,
+        ...Object.fromEntries(itemOutcomes.filter((item) => item.item_type === "routine").map((item) => [item.item_id, item.status === "done"])),
+      }));
       setWrapUpOpen(false);
       setNotice("Daily wrap-up saved. Orbit will learn from what actually happened today.");
+      await loadTasks();
       await loadCoaching();
     } catch (error) {
       setNotice(error.response?.data?.detail || "Could not save the daily wrap-up.");
@@ -554,9 +637,9 @@ function App() {
   const nav = [["dashboard", "Overview", "⌂"], ["schedule", "Plan", "+"], ["routine", "Routine", "◔"], ["coach", "Ask Orbit", "✦"], ["history", "History", "◷"], ["settings", "Settings", "⚙"]];
   return <div className="app-shell">
     <aside className="sidebar"><button className="brand brand-button" onClick={() => setPage("dashboard")} aria-label="Go to dashboard">orbit<span>day</span></button><p className="workspace-label">PERSONAL WORKSPACE</p><nav>{nav.map(([key, label, icon]) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => { setPage(key); if (key === "routine") loadRoutine(); }}><span>{icon}</span>{label}</button>)}</nav><div className="sidebar-bottom"><button className="user-chip" onClick={() => setPage("settings")} title="Open profile"><div>{(user?.name || user?.email || "U")[0].toUpperCase()}</div><span>{user?.name || user?.email}</span></button><button className="nav-item logout" onClick={logout}><span>↪</span>Log out</button></div></aside>
-    <main className="workspace"><header className="topbar"><div><p className="eyebrow">{page === "dashboard" ? "GOOD TO SEE YOU" : "YOUR PERSONAL SPACE"}</p><h1>{page === "dashboard" ? `Hello${user?.name ? `, ${user.name}` : ""}.` : page[0].toUpperCase() + page.slice(1)}</h1></div><div className="topbar-actions"><button className="secondary-button" onClick={() => setWrapUpOpen(true)}>Wrap up day</button><button className="notification-toggle" onClick={() => setMuted(!muted)}>{muted ? "Notifications off" : "Notifications on"}</button></div></header>{notice && <div className="notice success app-notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
-      {page === "dashboard" && <><section className="stats-grid"><article><span>ACTIVE PLANS</span><strong>{activeTasks.length}</strong><small>Ready for your attention</small></article><article><span>COMPLETED</span><strong>{completedCount}</strong><small>Tasks in your history</small></article><article><span>FOLLOW-THROUGH</span><strong>{completionRate}%</strong><small>Of logged tasks</small></article></section><section className="content-grid"><article className="panel wide"><div className="panel-heading"><div><p className="eyebrow">NEXT UP</p><h2>Your schedule</h2></div><button className="secondary-button" onClick={() => setPage("schedule")}>Plan a task</button></div>{activeTasks.length ? <div className="task-stack">{activeTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} onDetail={() => openTaskDetail(task)} onUpdate={() => openTask(task)} />)}</div> : <EmptyState title="A clear day starts with one plan." action="Schedule your first task" onClick={() => setPage("schedule")} />}</article><article className="panel coach-card"><p className="eyebrow">YOUR SECOND MIND</p><h2>Best next move</h2><p>{secondMind?.answer || coach}</p><hr /><p className="insight"><b>{secondMind?.suggested_time ? `Suggested time · ${secondMind.suggested_time}` : "Suggested next step"}</b>{insight}</p>{secondMind?.data_mode === "bootstrap" && <p className="ai-status">Starter guidance · personalized as you add routine and outcomes</p>}{secondMind?.data_mode === "blended" && <p className="ai-status">Learning from your routine · becoming more personal</p>}<button className="secondary-button coach-link" onClick={() => setPage("coach")}>Ask Orbit</button></article></section></>}
-      {page === "schedule" && <section className="plan-layout"><article className="panel schedule-card"><p className="eyebrow">ADD TO YOUR DAY</p><h2>Plan a task window</h2><form className="task-form" onSubmit={createTask}><label>What do you want to do?<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Finish college assignment" required /></label><div className="two-column"><label>Available from<input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} required /></label><label>Deadline / end window<input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} required /></label></div><div className="duration-field"><span>Estimated effort</span><div><input type="number" min="0" max="720" value={form.durationHours} onChange={(e) => setForm({ ...form, durationHours: e.target.value })} placeholder="Hours" aria-label="Duration hours" /><input type="number" min="0" max="59" value={form.durationMinutes} onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })} placeholder="Minutes" aria-label="Duration minutes" /></div><small>Orbit uses this duration to find a free slot inside your available window.</small></div><div className="two-column"><label>Current energy (1–10)<input type="range" min="1" max="10" value={form.currentEnergy} onChange={(e) => setForm({ ...form, currentEnergy: e.target.value })} /><small>{form.currentEnergy}/10</small></label><label>Current stress (1–10)<input type="range" min="1" max="10" value={form.currentStress} onChange={(e) => setForm({ ...form, currentStress: e.target.value })} /><small>{form.currentStress}/10</small></label></div>{scheduleAdvice && <div className={scheduleAdvice.has_conflict ? "schedule-advice warning" : "schedule-advice"}><b>Orbit’s scheduling note · {scheduleAdvice.completion_probability}% likely</b><span>{scheduleAdvice.message}</span>{scheduleAdvice.has_conflict && scheduleAdvice.suggested_start && <button type="button" className="secondary-button" onClick={() => setForm({ ...form, start: dateTimeLocal(scheduleAdvice.suggested_start) })}>Use {displayDate(scheduleAdvice.suggested_start)}</button>}</div>}<div className="two-column"><label>Priority<select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}><option value="high">High — do this first if plans overlap</option><option value="medium">Medium — normal priority</option><option value="low">Low — flexible</option></select></label><label>Difficulty <span>(for Orbit’s estimate)</span><select value={form.taskDifficulty} onChange={(e) => setForm({ ...form, taskDifficulty: e.target.value })}><option value="">Use profile default</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label></div><button className="primary-button">Add to plan</button></form></article><article className="panel"><p className="eyebrow">START FASTER</p><h2>Routine templates</h2><div className="preset-list">{[["Morning workout", 45], ["Deep work session", 90], ["Read and learn", 30], ["Daily reflection", 20]].map(([title, minutes]) => <button key={title} onClick={() => applyPreset(title, minutes)}><span>{title}</span><small>{minutes} min</small></button>)}</div></article></section>}
+    <main className="workspace"><header className="topbar"><div><p className="eyebrow">{page === "dashboard" ? "GOOD TO SEE YOU" : "YOUR PERSONAL SPACE"}</p><h1>{page === "dashboard" ? `Hello${user?.name ? `, ${user.name}` : ""}.` : page[0].toUpperCase() + page.slice(1)}</h1></div><div className="topbar-actions"><button className="secondary-button" onClick={openWrapUp}>Wrap up day</button><button className="notification-toggle" onClick={() => setMuted(!muted)}>{muted ? "Notifications off" : "Notifications on"}</button></div></header>{notice && <div className="notice success app-notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
+      {page === "dashboard" && <><section className="stats-grid"><article><span>ACTIVE PLANS</span><strong>{activeTasks.length}</strong><small>Ready for your attention</small></article><article><span>COMPLETED</span><strong>{completedCount}</strong><small>Tasks in your history</small></article><article><span>FOLLOW-THROUGH</span><strong>{completionRate}%</strong><small>Of logged tasks</small></article></section><section className="content-grid"><article className="panel wide"><div className="panel-heading"><div><p className="eyebrow">NEXT UP</p><h2>Your schedule</h2></div><button className="secondary-button" onClick={() => setPage("schedule")}>Plan a task</button></div>{todaySchedule.length ? <div className="daily-checklist">{todaySchedule.map((item) => <label className={`daily-checklist-item ${item.status === "completed" ? "completed" : ""}`} key={`${item.type}-${item.id}`}><input type="checkbox" checked={item.status === "completed"} onChange={() => completeDashboardItem(item)} aria-label={`Mark ${item.title} complete`} /><span className="daily-checklist-copy"><b>{item.title}</b><small>{displayTime(item.start)}{item.end ? ` – ${displayTime(item.end)}` : ""}</small></span><span className={`schedule-status ${item.status === "completed" ? "completed" : ""}`}>{item.status === "completed" ? "Completed" : "Scheduled"}</span></label>)}</div> : <EmptyState title="A clear day starts with one plan." action={hasPriorActivity ? "Schedule today's first task" : "Schedule your first task"} onClick={() => setPage("schedule")} />}</article><article className="panel coach-card"><p className="eyebrow">YOUR SECOND MIND</p><h2>Best next move</h2><p>{secondMind?.answer || coach}</p><hr /><p className="insight"><b>{secondMind?.suggested_time ? `Suggested time · ${secondMind.suggested_time}` : "Suggested next step"}</b>{insight}</p>{secondMind?.data_mode === "bootstrap" && <p className="ai-status">Starter guidance · personalized as you add routine and outcomes</p>}{secondMind?.data_mode === "blended" && <p className="ai-status">Learning from your routine · becoming more personal</p>}<button className="secondary-button coach-link" onClick={() => setPage("coach")}>Ask Orbit</button></article></section></>}
+      {page === "schedule" && <section className="plan-layout"><article className="panel schedule-card"><p className="eyebrow">ADD TO YOUR DAY</p><h2>Plan a task window</h2><form className="task-form" onSubmit={createTask}><label>What do you want to do?<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Finish college assignment" required /></label><div className="two-column"><label>Available from<input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} required /></label><label>Deadline / end window<input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} required /></label></div><div className="duration-field"><span>Estimated effort</span><div><input type="number" min="0" max="720" value={form.durationHours} onChange={(e) => setForm({ ...form, durationHours: e.target.value })} placeholder="Hours" aria-label="Duration hours" /><input type="number" min="0" max="59" value={form.durationMinutes} onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })} placeholder="Minutes" aria-label="Duration minutes" /></div><small>Orbit uses this duration to find a free slot inside your available window.</small></div><div className="two-column"><label>Current energy (1–10)<input type="range" min="1" max="10" value={form.currentEnergy} onChange={(e) => setForm({ ...form, currentEnergy: e.target.value })} /><small>{form.currentEnergy}/10</small></label><label>Current stress (1–10)<input type="range" min="1" max="10" value={form.currentStress} onInput={(e) => setForm({ ...form, currentStress: e.currentTarget.value })} onChange={(e) => setForm({ ...form, currentStress: e.target.value })} aria-describedby="stress-feedback" /><small id="stress-feedback" className={`stress-feedback ${stressFeedback(form.currentStress).tone}`} aria-live="polite"><span aria-hidden="true">{stressFeedback(form.currentStress).emoji}</span> {form.currentStress || 5}/10 · {stressFeedback(form.currentStress).label}</small></label></div>{scheduleAdvice && <div className={scheduleAdvice.has_conflict ? "schedule-advice warning" : "schedule-advice"}><b>Orbit’s scheduling note · {scheduleAdvice.completion_probability}% likely</b><span>{scheduleAdvice.message}</span>{scheduleAdvice.has_conflict && scheduleAdvice.suggested_start && <button type="button" className="secondary-button" onClick={() => setForm({ ...form, start: dateTimeLocal(scheduleAdvice.suggested_start) })}>Use {displayDate(scheduleAdvice.suggested_start)}</button>}</div>}<div className="two-column"><label>Priority<select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}><option value="high">High — do this first if plans overlap</option><option value="medium">Medium — normal priority</option><option value="low">Low — flexible</option></select></label><label>Difficulty <span>(for Orbit’s estimate)</span><select value={form.taskDifficulty} onChange={(e) => setForm({ ...form, taskDifficulty: e.target.value })}><option value="">Use profile default</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label></div><button className="primary-button">Add to plan</button></form></article><article className="panel"><p className="eyebrow">START FASTER</p><h2>Routine templates</h2><div className="preset-list">{[["Morning workout", 45], ["Deep work session", 90], ["Read and learn", 30], ["Daily reflection", 20]].map(([title, minutes]) => <button key={title} onClick={() => applyPreset(title, minutes)}><span>{title}</span><small>{minutes} min</small></button>)}</div></article></section>}
       {page === "routine" && <section className="routine-layout"><article className="panel"><p className="eyebrow">DAILY TIME CHECK-IN</p><h2>When did your day happen?</h2><p className="muted-copy routine-intro">Start with the essentials. Add only the activities that matter today—Orbit will protect them when planning.</p><form className="task-form" onSubmit={saveRoutine}><label>Day<input type="date" value={routineDate} onChange={(e) => changeRoutineDate(e.target.value)} required /></label><div className="routine-grid">{routineActivities.map((key) => { const [label, icon] = ROUTINE_META[key] || [key.replace(/^custom_/, "").replace(/_/g, " "), "✦"]; return <label key={key} className="routine-entry"><span className="routine-icon">{icon}</span><span>{label}</span><input type="time" value={routineTimes[key] || ""} onChange={(e) => setRoutineTimes({ ...routineTimes, [key]: e.target.value })} /></label>; })}</div><div className="routine-add"><select defaultValue="" onChange={(e) => { if (e.target.value) addRoutineActivity(e.target.value); e.target.value = ""; }}><option value="" disabled>+ Add more activities</option>{["exercise", "study", "wind_down"].filter((key) => !routineActivities.includes(key)).map((key) => <option key={key} value={key}>{ROUTINE_META[key][0]}</option>)}<option value="custom">Custom…</option></select><div className="routine-custom"><input value={customRoutineName} onChange={(e) => setCustomRoutineName(e.target.value)} placeholder="Custom activity name" /><button type="button" className="secondary-button" onClick={() => addRoutineActivity("custom")}>Add</button></div></div><div className="routine-actions"><button type="button" className="text-button" onClick={dismissRoutineForToday}>Do this later</button><button className="primary-button" disabled={routineLoading}>{routineLoading ? "Saving routine…" : "Save today’s times"}</button></div></form></article><article className="panel routine-help"><p className="eyebrow">WHY THIS MATTERS</p><h2>Better timing, less effort</h2><p>Orbit needs only your major commitments—not a minute-by-minute diary—to find realistic task slots.</p><p className="muted-copy">Tasks and routine anchors together create the available time that Orbit schedules around.</p></article></section>}
       {page === "coach" && <section className="coach-layout"><aside className="panel coach-sessions"><button className="secondary-button" onClick={newCoachChat}>+ New chat</button><p className="eyebrow">PREVIOUS CHATS</p><div>{coachSessions.map((session) => <div key={session.id} className="coach-session-row"><button className={activeCoachSessionId === session.id ? "coach-session active" : "coach-session"} onClick={() => loadCoachMessages(session.id)}><b>{session.title}</b><small>{session.preview || "Start a conversation"} · {new Date(session.updated_at).toLocaleDateString()}</small></button><button className="delete-chat" onClick={() => deleteCoachChat(session.id)} aria-label={`Delete ${session.title}`} title="Delete chat">×</button></div>)}</div></aside><article className="panel coach-conversation"><p className="eyebrow">ORBIT, YOUR SECOND MIND</p><h2>Think through your day</h2><p className="muted-copy">Ask anything naturally. Orbit only suggests a time when you ask it to plan or schedule.</p><div className="message-stack">{!coachMessages.length && <div className="coach-message assistant">Hi—what would you like to think through?</div>}{coachMessages.map((message, index) => <div key={index} className={`coach-message ${message.role}`}>{message.text}</div>)}</div><form className="coach-form" onSubmit={askCoach}><input value={coachQuestion} onChange={(e) => setCoachQuestion(e.target.value)} placeholder="e.g. When should I study today?" maxLength="500" /><button className="primary-button" disabled={coachSending}>{coachSending ? "Thinking…" : "Ask Orbit"}</button></form></article><article className="panel coach-facts"><p className="eyebrow">TODAY’S REASONING</p><h2>What Orbit is using</h2><div className="settings-line"><span>Conversation</span><b>{secondMind?.ai_mode === "live" ? "Live AI" : ["schedule fallback", "schedule-aware"].includes(secondMind?.ai_mode) ? "Schedule-aware" : "Ready for a question"}</b></div><div className="settings-line"><span>Suggested focus time</span><b>{secondMind?.suggested_time || "Learning your routine"}</b></div><div className="settings-line"><span>Next-step priority</span><b>{secondMind?.priority || "Medium"}</b></div><p className="muted-copy">{secondMind?.reason || "Complete a few tasks and save routine times so Orbit can recognize your most useful hours."}</p></article></section>}
       {page === "history" && <section className="panel"><div className="panel-heading"><div><p className="eyebrow">SAVED TO YOUR ACCOUNT</p><h2>Activity history</h2></div><span className="count-pill">{historyTasks.length} records</span></div>{historyTasks.length ? <div className="history-table">{historyTasks.map((task) => <div key={task.id} className="history-row"><div><b>{task.title}</b><small>{displayDate(task.scheduled_time)}</small>{task.user_reason && <em>“{task.user_reason}”</em>}</div><span className={`status ${task.status}`}>{task.status}</span></div>)}</div> : <EmptyState title="Completed plans will live here." action="View your schedule" onClick={() => setPage("dashboard")} />}</section>}
@@ -564,7 +647,7 @@ function App() {
     </main>
     {selectedTask && <div className="modal-backdrop" onMouseDown={() => setSelectedTask(null)}><form className="modal" onSubmit={updateTask} onMouseDown={(event) => event.stopPropagation()}><button type="button" className="close-button" onClick={() => setSelectedTask(null)}>×</button><p className="eyebrow">UPDATE TASK</p><h2>{selectedTask.title}</h2><p className="task-date">Scheduled: {displayDate(selectedTask.scheduled_time)}</p><div className="response-options">{[["completed", "Completed"], ["rescheduled", "Reschedule"], ["skipped", "Skip"]].map(([key, label]) => <button type="button" key={key} className={response === key ? "selected" : ""} onClick={() => setResponse(key)}>{label}</button>)}</div>{response === "rescheduled" && <><div className="two-column"><label>Available from<input type="datetime-local" value={rescheduleTime} onChange={(e) => setRescheduleTime(e.target.value)} required /></label><label>Available until<input type="datetime-local" value={rescheduleEndTime} onChange={(e) => setRescheduleEndTime(e.target.value)} required /></label></div><small>Orbit keeps the same effort and finds a free slot inside this window.</small></>}<label>Reflection (optional)<textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What helped or got in the way?" /></label><button type="submit" className="primary-button">{response === "rescheduled" ? "Find and reschedule" : "Save update"}</button></form></div>}
       {taskDetail && <div className="modal-backdrop" onMouseDown={() => setTaskDetail(null)}><section className="modal detail-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setTaskDetail(null)}>×</button><p className="eyebrow">TASK DETAIL · ORBIT INSIGHT</p><h2>{taskDetail.task.title}</h2>{taskDetail.loading ? <p>Building a day-aware recommendation…</p> : <><div className="detail-grid"><span><b>Priority</b>{taskDetail.task.priority}</span><span><b>Window</b>{displayDate(taskDetail.task.scheduled_time)}</span><span><b>Estimated effort</b>{taskDetail.task.duration_minutes || "—"} min</span>{taskDetail.energy_required != null && <span><b>Energy</b>{taskDetail.energy_required}/10 needed · {taskDetail.energy_available}/10 available</span>}{taskDetail.stress_level != null && <span><b>Stress</b>{taskDetail.stress_level}/10</span>}<span><b>Completion probability</b>{taskDetail.completion_probability}%</span></div><div className="schedule-advice"><b>Orbit’s recommendation</b><span>{taskDetail.recommendation}</span></div></>}<button className="secondary-button" onClick={() => { setTaskDetail(null); openTask(taskDetail.task); }}>Update task</button></section></div>}
-    {wrapUpOpen && <div className="modal-backdrop" onMouseDown={() => setWrapUpOpen(false)}><section className="modal" onMouseDown={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setWrapUpOpen(false)}>×</button><p className="eyebrow">END-OF-DAY CHECK-IN</p><h2>How did your routine go?</h2><p className="muted-copy">Confirm what really happened so Orbit can make better plans tomorrow. Update any remaining task from your schedule when you are ready.</p><div className="response-options">{[["followed", "Followed"], ["partly_followed", "Partly followed"], ["not_followed", "Not followed"]].map(([key, label]) => <button key={key} className={routineReview === key ? "selected" : ""} onClick={() => setRoutineReview(key)}>{label}</button>)}</div><label>What changed? <span>(optional)</span><textarea value={wrapUpNotes} onChange={(e) => setWrapUpNotes(e.target.value)} placeholder="Anything skipped, moved, or unexpectedly tiring?" /></label><button className="primary-button" onClick={saveWrapUp}>Save today’s review</button></section></div>}
+    {wrapUpOpen && <div className="modal-backdrop" onMouseDown={() => setWrapUpOpen(false)}><section className="modal wrap-up-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setWrapUpOpen(false)}>×</button><p className="eyebrow">END-OF-DAY CHECK-IN</p><h2>How did your routine go?</h2><p className="muted-copy">Confirm what really happened so Orbit can make better plans tomorrow.</p><div className="response-options">{[["followed", "Followed"], ["partly_followed", "Partly followed"], ["not_followed", "Not followed"]].map(([key, label]) => <button type="button" key={key} className={routineReview === key ? "selected" : ""} onClick={() => selectRoutineReview(key)}>{label}</button>)}</div>{routineReview === "partly_followed" && <section className="wrap-up-breakdown" aria-label="Today's item outcomes"><b>What was completed?</b>{todaySchedule.length ? todaySchedule.map((item) => { const itemKey = `${item.type}:${item.id}`; const isDone = (wrapUpOutcomes[itemKey] || "missed") === "done"; return <label className="wrap-up-item" key={itemKey}><span><b>{item.title}</b><small>{displayTime(item.start)}{item.end ? ` – ${displayTime(item.end)}` : ""} · {item.type === "routine" ? "Routine" : "Task"}</small></span><button type="button" className={isDone ? "outcome-toggle done" : "outcome-toggle missed"} aria-pressed={isDone} onClick={() => setWrapUpOutcomes((previous) => ({ ...previous, [itemKey]: isDone ? "missed" : "done" }))}>{isDone ? "Done" : "Missed"}</button></label>; }) : <p className="muted-copy">There are no tasks or routine times assigned for today.</p>}</section>}<label>What changed? <span>(optional)</span><textarea value={wrapUpNotes} onChange={(e) => setWrapUpNotes(e.target.value)} placeholder="Anything skipped, moved, or unexpectedly tiring?" /></label><button className="primary-button" onClick={saveWrapUp}>Save today’s review</button></section></div>}
   </div>;
 }
 

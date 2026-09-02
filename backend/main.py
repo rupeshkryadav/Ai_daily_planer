@@ -359,9 +359,18 @@ class RoutineCheckInStatusRequest(BaseModel):
     dismissed: bool = False
 
 
+class DailyReviewItemOutcome(BaseModel):
+    item_type: str = Field(pattern="^(task|routine)$")
+    item_id: int = Field(gt=0)
+    status: str = Field(pattern="^(done|missed)$")
+
+
 class DailyReviewRequest(BaseModel):
     routine_status: str
     notes: str = Field(default="", max_length=500)
+    # Optional reconciliation details let the wrap-up screen update tasks in
+    # the same transaction without changing the existing review schema.
+    item_outcomes: list[DailyReviewItemOutcome] = Field(default_factory=list, max_length=100)
     client_time: Optional[datetime] = None
     time_zone: str = Field(default="", max_length=64)
 
@@ -1408,6 +1417,36 @@ def save_daily_review(
         Task.scheduled_time >= review_day,
         Task.scheduled_time < review_day + timedelta(days=1),
     ).all()
+    today_task_by_id = {task.id: task for task in today_tasks}
+    today_routine_ids = {
+        entry.id for entry in db.query(TimeEntry).filter(
+            TimeEntry.user_id == current_user.id,
+            TimeEntry.occurred_at >= review_day,
+            TimeEntry.occurred_at < review_day + timedelta(days=1),
+        ).all()
+    }
+    outcomes = {(item.item_type, item.item_id): item.status for item in data.item_outcomes}
+    invalid_items = [
+        key for key in outcomes if (
+            (key[0] == "task" and key[1] not in today_task_by_id)
+            or (key[0] == "routine" and key[1] not in today_routine_ids)
+        )
+    ]
+    if invalid_items:
+        raise HTTPException(status_code=400, detail="Wrap-up items must belong to today's schedule")
+
+    # Routine anchors do not have an independent completion column in the
+    # current schema; their outcomes are represented by this daily review.
+    # Tasks do have durable status, so reconcile them atomically here.
+    for (item_type, item_id), outcome in outcomes.items():
+        if item_type != "task":
+            continue
+        task = today_task_by_id[item_id]
+        if outcome == "done":
+            task.status = "completed"
+            task.completed_at = task.completed_at or datetime.utcnow()
+        elif task.status != "completed":
+            task.status = "skipped"
     review = db.query(DailyReview).filter(
         DailyReview.user_id == current_user.id,
         DailyReview.review_date == review_day,
@@ -1422,7 +1461,11 @@ def save_daily_review(
     review.rescheduled_tasks = sum(task.rescheduled_time is not None for task in today_tasks)
     review.recorded_at = datetime.utcnow()
     db.commit()
-    return {"message": "Daily wrap-up saved. Orbit will use it in future recommendations."}
+    return {
+        "message": "Daily wrap-up saved. Orbit will use it in future recommendations.",
+        "updated_task_ids": list(today_task_by_id),
+        "routine_outcomes_recorded": sum(key[0] == "routine" for key in outcomes),
+    }
 
 
 # ============================================================
