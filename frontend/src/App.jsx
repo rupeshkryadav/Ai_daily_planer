@@ -199,14 +199,6 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [page, token, form.title, form.start, form.end, form.durationHours, form.durationMinutes, form.priority, form.taskDifficulty, form.currentEnergy, form.currentStress]);
 
-  useEffect(() => {
-    if (!user || !tasks.length || new Date().getHours() < 20) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const reviewKey = `orbit_daily_review_${user.id}_${today}`;
-    const needsReview = tasks.some((task) => localDateKey(task.scheduled_time) === today && !["completed", "skipped"].includes(task.status));
-    if (needsReview && !localStorage.getItem(reviewKey)) openWrapUp();
-  }, [user, tasks]);
-
   const loadSession = async () => {
     try {
       const me = await axios.get(`${API_BASE}/users/me`, headers);
