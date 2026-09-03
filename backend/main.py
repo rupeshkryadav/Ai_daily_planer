@@ -1154,6 +1154,7 @@ def respond_to_task(
 ):
     allowed_statuses = {
         "completed",
+        "pending",
         "skipped",
         "rescheduled",
     }
@@ -1214,6 +1215,11 @@ def respond_to_task(
                 max(0.0, (task.completed_at - scheduled_end).total_seconds() / 60)
                 if scheduled_end else 0.0
             )
+        elif user_response == "pending":
+            # A checklist click can be corrected. Keep the scheduled window,
+            # but remove completion-only fields so the task is active again.
+            task.completed_at = None
+            task.delay_duration_minutes = None
 
     db.commit()
     db.refresh(task)
