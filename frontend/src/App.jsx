@@ -23,6 +23,7 @@ const localDateKey = (value) => {
   if (Number.isNaN(date.getTime())) return dateOnly(value);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 };
+const taskScheduleStatus = (task) => task.status === "skipped" ? "skipped" : (task.rescheduled_time ? "rescheduled" : task.status);
 const displayTime = (value) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const stressFeedback = (value) => {
   const stress = Number(value || 5);
@@ -94,13 +95,13 @@ function App() {
   const todayTasks = useMemo(() => tasks.filter((task) => localDateKey(task.scheduled_time) === today), [tasks, today]);
   const todaySchedule = useMemo(() => [
     ...todayRoutineEntries.map((entry) => ({ id: entry.id, type: "routine", title: ROUTINE_META[entry.activity]?.[0] || entry.activity.replace(/^custom_/, "").replace(/_/g, " "), start: entry.occurred_at, end: null, status: routineCompletion[entry.id] ? "completed" : "scheduled" })),
-    ...todayTasks.map((task) => ({ id: task.id, type: "task", title: task.title, start: task.scheduled_time, end: task.expected_end_time, status: task.status, task })),
+    ...todayTasks.map((task) => ({ id: task.id, type: "task", title: task.title, start: task.scheduled_time, end: task.expected_end_time, status: taskScheduleStatus(task), task })),
   ].sort((a, b) => new Date(a.start) - new Date(b.start)), [todayRoutineEntries, todayTasks, routineCompletion]);
   const upcomingSchedule = useMemo(() => activeTasks
     .filter((task) => localDateKey(task.scheduled_time) >= today)
     .sort((a, b) => new Date(a.scheduled_time) - new Date(b.scheduled_time))
     .slice(0, 5)
-    .map((task) => ({ id: task.id, type: "task", title: task.title, start: task.scheduled_time, end: task.expected_end_time, status: task.status, task })), [activeTasks, today]);
+    .map((task) => ({ id: task.id, type: "task", title: task.title, start: task.scheduled_time, end: task.expected_end_time, status: taskScheduleStatus(task), task })), [activeTasks, today]);
   const overviewSchedule = todaySchedule.length ? todaySchedule : upcomingSchedule;
   const showingUpcomingSchedule = !todaySchedule.length && overviewSchedule.length > 0;
   const hasPriorActivity = tasks.length > 0 || todayRoutineEntries.length > 0 || Boolean(user?.last_routine_completed_date);
@@ -660,7 +661,9 @@ function App() {
 
 function DailyScheduleItem({ item, onToggle, onDetail, onUpdate }) {
   const completed = item.status === "completed";
-  return <article className="daily-checklist-entry"><label className={`daily-checklist-item ${completed ? "completed" : ""}`}><input type="checkbox" checked={completed} onChange={onToggle} aria-label={`Mark ${item.title} ${completed ? "scheduled" : "complete"}`} /><span className="daily-checklist-copy"><b>{item.title}</b><small>{displayTime(item.start)}{item.end ? ` – ${displayTime(item.end)}` : ""}</small></span><span className={`schedule-status ${completed ? "completed" : ""}`}>{completed ? "Completed" : "Scheduled"}</span></label>{item.type === "task" && <div className="daily-checklist-actions"><button type="button" className="daily-item-action" onClick={onDetail}>Details</button><button type="button" className="daily-item-action" onClick={onUpdate}>Update</button></div>}</article>;
+  const skipped = item.status === "skipped";
+  const statusLabel = completed ? "Completed" : skipped ? "Skipped" : item.status === "rescheduled" ? "Rescheduled" : "Scheduled";
+  return <article className="daily-checklist-entry"><label className={`daily-checklist-item ${completed ? "completed" : ""}`}><input type="checkbox" checked={completed} disabled={skipped} onChange={onToggle} aria-label={skipped ? `${item.title} was skipped` : `Mark ${item.title} ${completed ? "scheduled" : "complete"}`} /><span className="daily-checklist-copy"><b>{item.title}</b><small>{displayTime(item.start)}{item.end ? ` – ${displayTime(item.end)}` : ""}</small></span><span className={`schedule-status ${item.status}`}>{statusLabel}</span></label>{item.type === "task" && <div className="daily-checklist-actions"><button type="button" className="daily-item-action" onClick={onDetail}>Details</button><button type="button" className="daily-item-action" onClick={onUpdate}>Update</button></div>}</article>;
 }
 
 function TaskRow({ task, onDetail, onUpdate }) { return <article className="task-row" role="button" tabIndex="0" onClick={onDetail} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onDetail(); }}><span className="task-icon">◷</span><span className="task-copy"><b>{task.title}</b><small>{displayDate(task.scheduled_time)}{task.expected_end_time ? ` — ${new Date(task.expected_end_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</small></span><span className={`priority ${task.priority || "medium"}`}>{task.priority || "medium"}</span><button type="button" className="task-action" onClick={(event) => { event.stopPropagation(); onUpdate(); }}>Update →</button></article>; }
